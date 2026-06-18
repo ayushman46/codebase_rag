@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+.env
+__pycache__/
+.venv/
+venv/
+indexes/
+repos/
+dist/
+build/
+.next/
+codebase_rag_gemini_prompt.md
+info.md
