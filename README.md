@@ -1,59 +1,57 @@
-# Codebase Intelligence System
+# Codebase Intelligence System (v2)
 
-The Codebase Intelligence System is a production grade platform designed for engineers to analyze and query large software repositories using natural language. This system combines advanced retrieval strategies with agentic reasoning to provide deep insights into complex codebases.
+This is a production-grade, zero-cost, serverless-ready codebase analysis RAG system. It is designed to index GitHub repositories entirely for free, storing persistent data in a free Postgres database, and utilizing high-performance free LLMs.
 
-## Core Capabilities
+## 1. Getting Your Free Credentials
 
-1. Multi Strategy Query Routing
-The system intelligently classifies every query into one of three optimized modes.
-Full Context Mode handles small repositories by processing the entire codebase within a large context window.
-RAG Mode uses a hybrid search approach for precise function level questions.
-Cached Summary Mode provides instant answers for high level architectural overviews using precomputed knowledge.
+To run this project, you need three free API keys and a database url. Create a `.env` file in the project root containing:
 
-2. High Fidelity Code Parsing
-Unlike traditional RAG systems that split text at arbitrary limits, this system utilizes Tree Sitter AST parsing. It extracts complete functions and classes to ensure that code chunks maintain logical boundaries and structural integrity across multiple programming languages.
+```env
+GROQ_API_KEY=your_groq_key
+GEMINI_API_KEY=your_gemini_key
+SUPABASE_URL=your_supabase_url
+SUPABASE_KEY=your_supabase_anon_key
+```
 
-3. Agentic Debugging Loop
-When initial context is insufficient, an autonomous agent loop can expand its search. The agent has the ability to trace import chains, fetch complete file contents, and analyze git history to resolve complex queries.
+### Groq API Key
+1. Go to [console.groq.com](https://console.groq.com/).
+2. Sign in with Google/GitHub and click **API Keys**.
+3. Create a new key. Groq provides a generous free tier for `llama-3.3-70b-versatile`.
 
-4. Performance Optimized Retrieval
-The platform combines dense vector search via FAISS and sparse keyword search via BM25. A cross encoder reranker ensures sub 100ms precision by fusion scoring and ranking results before they reach the language model.
+### Gemini API Key
+1. Go to [Google AI Studio](https://aistudio.google.com/).
+2. Click **Get API Key** and generate one. It is completely free.
+3. This is used for `gemini-2.0-flash` batch summarization.
 
-## Technical Architecture
+### Supabase URL & Key (Postgres Database)
+1. Go to [supabase.com](https://supabase.com/) and create a free project.
+2. Once the database is provisioned, go to **Project Settings -> API**.
+3. Copy the `Project URL` to `SUPABASE_URL`.
+4. Copy the `anon / public` key to `SUPABASE_KEY`.
+5. Go to the **SQL Editor** in the Supabase dashboard and run the exact SQL command found in `supabase/00_init.sql` to create your tables and enable `pgvector`.
 
-Backend
-The backend is built with FastAPI and Python 3.11. It uses an asynchronous architecture to handle LLM calls and file operations efficiently.
+## 2. Running Locally
 
-Frontend
-The frontend is a modern React application. It features real time indexing progress, syntax highlighted code citations, and interactive agent traces.
+### Backend
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
 
-Language Models
-The system leverages Groq for fast query classification and agent loops. Google Gemini handles large context window operations and repository summarization.
+### Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173` in your browser.
 
-Storage
-The system uses a file based storage approach for FAISS indexes, BM25 pickles, and precomputed metadata. This eliminates the need for complex database configurations.
+## 3. Free Hosting Quirks
 
-## Getting Started
-
-1. Environment Configuration
-Create a .env file in the root directory. Add your API keys for Groq and Gemini as specified in the example configuration.
-
-2. Backend Setup
-The backend can be deployed using Docker. Run the docker compose up command to build and start the primary services.
-
-3. Frontend Setup
-Navigate to the frontend directory. Install the necessary dependencies and start the development server using standard package management commands.
-
-4. Verification
-A benchmark script is included to run automated accuracy tests against real world repositories. Use this to verify the system performance.
-
-## Supported Languages
-
-The system provides specialized support for the following languages
-Python
-JavaScript
-TypeScript
-Java
-Go
-Rust
-Markdown and configuration files are also supported through a unified indexing pipeline.
+If you deploy this to free platforms (like Render/Railway for the backend, Vercel for the frontend), keep the following in mind:
+- **Supabase Free Projects** will automatically pause if they receive no activity for 7 days. If your app stops working, log into Supabase and click "Restore Project".
+- **Render Free Web Services** spin down to sleep after 15 minutes of inactivity. When you hit the frontend after a long break, the first request (e.g. fetching indexed repos) might take ~30-50 seconds to respond while the server wakes up.
+- The Vercel frontend is statically generated and will never sleep.

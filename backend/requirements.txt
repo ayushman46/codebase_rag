@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+groq
+google-generativeai
+sentence-transformers
+supabase
+GitPython
+pydantic-settings
+tiktoken

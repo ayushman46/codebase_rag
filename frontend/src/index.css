@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+@theme {
+  /* Colors */
+  --color-ember-orange: #ff3c00;
+  --color-sunset-coral: #ff764c;
+  --color-peach-blush: #ffb199;
+  --color-burnt-rust: #ec4e02;
+  --color-electric-blue: #2492ff;
+  --color-warm-canvas: #faf6f1;
+  --color-pure-white: #ffffff;
+  --color-ink-black: #0e0e0f;
+  --color-charcoal: #312e2e;
+  --color-slate: #36373b;
+  --color-deep-charcoal: #1a1919;
+  --color-gunmetal: #2f3034;
+  --color-stone: #898c94;
+  --color-pewter: #52545a;
+  --color-warm-gray: #76716f;
+  --color-mist: #61646b;
+  --color-sand: #dfddd8;
+  --color-driftwood: #cbc7c3;
+  --color-fog: #efefef;
+
+  /* Typography */
+  --font-abc-diatype: 'ABC Diatype', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-abc-diatype-plus-variable: 'ABC Diatype Plus Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  
+  /* Typography — Scale */
+  --text-caption: 11px;
+  --text-body: 16px;
+  --text-subheading: 20px;
+  --text-heading-sm: 24px;
+  --text-heading: 32px;
+  --text-heading-lg: 48px;
+  --text-display: 64px;
+
+  /* Spacing */
+  --spacing-4: 4px;
+  --spacing-8: 8px;
+  --spacing-12: 12px;
+  --spacing-16: 16px;
+  --spacing-20: 20px;
+  --spacing-24: 24px;
+  --spacing-32: 32px;
+  --spacing-40: 40px;
+  --spacing-48: 48px;
+  --spacing-60: 60px;
+  --spacing-64: 64px;
+  --spacing-80: 80px;
+  --spacing-120: 120px;
+
+  /* Border Radius */
+  --radius-md: 6px;
+  --radius-2xl: 16px;
+  --radius-2xl-2: 20px;
+  --radius-3xl: 24px;
+  --radius-3xl-2: 40px;
+  --radius-3xl-3: 46px;
+  --radius-full: 56px;
+  --radius-full-2: 60px;
+  --radius-full-3: 70px;
+  --radius-full-4: 90px;
+  --radius-full-5: 100px;
+  --radius-full-6: 999px;
+  
+  /* Named Radii */
+  --radius-nav: 6px;
+  --radius-cards: 40px;
+  --radius-badges: 6px;
+  --radius-inputs: 20px;
+  --radius-buttons: 100px;
+}
+
+body {
+  font-family: var(--font-abc-diatype);
+  background-color: var(--color-warm-canvas);
+  color: var(--color-ink-black);
+}
+
+.heading-display {
+  font-family: var(--font-abc-diatype-plus-variable);
+  letter-spacing: -0.05em;
+  line-height: 0.9;
+  font-weight: 400;
+}
+
+.heading-lg {
+  font-family: var(--font-abc-diatype-plus-variable);
+  letter-spacing: -0.04em;
+  line-height: 1.0;
+  font-weight: 400;
+}
+
+.heading-sm {
+  font-family: var(--font-abc-diatype-plus-variable);
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  font-weight: 500;
+}
+
+.pill-button {
+  border-radius: 100px;
+  background-color: var(--color-ember-orange);
+  color: var(--color-pure-white);
+  padding: 10px 20px;
+  font-weight: 500;
+  transition: background-color 0.2s ease;
+}
+
+.pill-button:hover {
+  background-color: var(--color-burnt-rust);
+}
+
+.outline-button {
+  border-radius: 100px;
+  background-color: transparent;
+  border: 1.5px solid var(--color-ink-black);
+  color: var(--color-ink-black);
+  padding: 10px 20px;
+  font-weight: 500;
+}
