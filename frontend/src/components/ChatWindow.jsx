@@ -84,7 +84,7 @@ const ChatWindow = () => {
           <button
             type="submit"
             disabled={isQuerying || !input.trim()}
-            className="absolute right-1.5 w-9 h-9 bg-ember-orange hover:bg-burnt-rust text-pure-white rounded-full flex items-center justify-center transition-colors disabled:opacity-50"
+            className="absolute right-1.5 w-10 h-10 bg-ember-orange hover:bg-burnt-rust text-pure-white rounded-full flex items-center justify-center transition-colors disabled:opacity-50"
           >
             <Send className="w-4 h-4" />
           </button>

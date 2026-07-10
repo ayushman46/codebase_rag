@@ -1,10 +1,44 @@
-# Codebase Intelligence System (v2)
+# Codebase Intelligence System
 
-This is a production-grade, zero-cost, serverless-ready codebase analysis RAG system. It is designed to index GitHub repositories entirely for free, storing persistent data in a free Postgres database, and utilizing high-performance free LLMs.
+A production ready AI powered codebase understanding platform that allows developers to chat with any GitHub repository using Retrieval Augmented Generation (RAG), hybrid search, and agentic reasoning.
 
-## 1. Getting Your Free Credentials
+The system automatically clones a repository, indexes its source code, generates semantic embeddings, and enables natural language conversations with accurate, cited responses grounded in the repository itself.
 
-To run this project, you need three free API keys and a database url. Create a `.env` file in the project root containing:
+---
+
+## Overview
+
+Understanding a large codebase is one of the biggest challenges for developers joining new projects.
+
+This platform automates repository ingestion, semantic indexing, and intelligent retrieval so developers can ask questions such as:
+
+* How does authentication work?
+* Where is this API implemented?
+* Trace the execution of this function.
+* Explain the overall architecture.
+* Which files are responsible for database operations?
+
+Instead of searching manually through hundreds of files, the system retrieves only the relevant code and provides grounded answers.
+
+---
+
+## Features
+
+* GitHub repository ingestion
+* Automatic code parsing and intelligent chunking
+* Local embedding generation
+* Hybrid semantic and keyword search
+* Reciprocal Rank Fusion based retrieval
+* Agentic multi-step reasoning
+* Repository onboarding manual generation
+* Multi-tenant architecture
+* Google OAuth authentication
+* Source cited responses
+* Background asynchronous indexing
+
+---
+
+## Architecture
 
 ```env
 GROQ_API_KEY=your_groq_key
@@ -15,15 +49,9 @@ VITE_SUPABASE_URL=your_supabase_url
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-### Groq API Key
-1. Go to [console.groq.com](https://console.groq.com/).
-2. Sign in with Google/GitHub and click **API Keys**.
-3. Create a new key. Groq provides a generous free tier for `llama-3.3-70b-versatile`.
+---
 
-### Gemini API Key
-1. Go to [Google AI Studio](https://aistudio.google.com/).
-2. Click **Get API Key** and generate one. It is completely free.
-3. This is used for `gemini-2.0-flash` batch summarization.
+## Technology Stack
 
 ### Supabase URL, Service Role Key, and Anon Key (Postgres Database + Auth)
 1. Go to [supabase.com](https://supabase.com/) and create a free project.
@@ -34,28 +62,182 @@ VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 6. Copy the `anon / public` key to `VITE_SUPABASE_ANON_KEY` for the frontend.
 7. Go to the **SQL Editor** in the Supabase dashboard and run the exact SQL command found in `supabase/00_init.sql` to create your tables and enable `pgvector`.
 
-## 2. Running Locally
+* React
+* Vite
+* Tailwind CSS
+* Zustand
 
 ### Backend
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+
+* FastAPI
+* Python
+* AsyncIO
+
+### Database
+
+* Supabase
+* PostgreSQL
+* pgvector
+
+### AI
+
+* Sentence Transformers
+* Groq
+* Google Gemini
+
+### Authentication
+
+* Supabase Auth
+* Google OAuth
+
+---
+
+## Retrieval Pipeline
+
+1. Repository is cloned from GitHub.
+2. Source files are intelligently chunked.
+3. Each chunk is converted into vector embeddings.
+4. Embeddings and metadata are stored inside PostgreSQL.
+5. User queries are embedded.
+6. Dense vector search and keyword search run simultaneously.
+7. Reciprocal Rank Fusion merges both result sets.
+8. Retrieved context is passed to the LLM.
+9. Agent tools expand context when required.
+10. A grounded response is returned with citations.
+
+---
+
+## Search Strategy
+
+The system combines multiple retrieval techniques.
+
+### Dense Retrieval
+
+Semantic similarity using vector embeddings.
+
+### Sparse Retrieval
+
+PostgreSQL Full Text Search for exact identifiers, variable names, and symbols.
+
+### Reciprocal Rank Fusion
+
+Results from both retrieval methods are merged to improve ranking quality and reduce retrieval failures.
+
+---
+
+## Agent Workflow
+
+The reasoning engine can perform multiple retrieval steps before generating an answer.
+
+Available capabilities include:
+
+* Repository summarization
+* Context expansion
+* Symbol tracing
+* Architecture explanation
+* Dependency discovery
+
+The agent dynamically decides whether additional retrieval is required before responding.
+
+---
+
+## Engineering Highlights
+
+### Intelligent Chunking
+
+Instead of relying on language-specific AST parsers, the project uses robust regex-based boundary detection with recursive fallback splitting, allowing reliable indexing across multiple programming languages.
+
+### Hybrid Retrieval
+
+Combines semantic vector search with traditional keyword search for higher retrieval accuracy.
+
+### Multi Tenant Design
+
+Every repository is scoped to an authenticated user, ensuring complete data isolation.
+
+### Rate Limit Protection
+
+An asynchronous sliding window queue prevents API rate limit failures during ingestion and querying.
+
+### Knowledge Cache
+
+Repository summaries and onboarding documentation are generated once and reused for future conversations, reducing latency and token usage.
+
+---
+
+## Project Structure
+
+```
+frontend/
+backend/
+database/
+embeddings/
+retrieval/
+agents/
+utils/
 ```
 
-### Frontend
+---
+
+## Future Improvements
+
+* AST based language aware chunking
+* Repository visualization
+* Dependency graph generation
+* Pull request analysis
+* Code review assistant
+* Repository comparison
+* Local LLM support
+* Incremental repository indexing
+
+---
+
+## Getting Started
+
+Clone the repository.
+
 ```bash
-cd frontend
+git clone <repository-url>
+```
+
+Install dependencies.
+
+```bash
+pip install -r requirements.txt
+```
+
+Configure environment variables.
+
+```bash
+SUPABASE_URL=
+SUPABASE_KEY=
+GROQ_API_KEY=
+GOOGLE_API_KEY=
+```
+
+Run the backend.
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Run the frontend.
+
+```bash
 npm install
 npm run dev
 ```
-Open `http://localhost:5173` in your browser.
 
-## 3. Free Hosting Quirks
+---
 
-If you deploy this to free platforms (like Render/Railway for the backend, Vercel for the frontend), keep the following in mind:
-- **Supabase Free Projects** will automatically pause if they receive no activity for 7 days. If your app stops working, log into Supabase and click "Restore Project".
-- **Render Free Web Services** spin down to sleep after 15 minutes of inactivity. When you hit the frontend after a long break, the first request (e.g. fetching indexed repos) might take ~30-50 seconds to respond while the server wakes up.
-- The Vercel frontend is statically generated and will never sleep.
+## Why This Project
+
+This project demonstrates practical applications of modern AI systems beyond simple chatbot interfaces.
+
+It combines retrieval augmented generation, vector search, agentic reasoning, asynchronous backend engineering, and scalable database design into a production-oriented platform capable of understanding and navigating large software repositories.
+
+---
+
+## License
+
+MIT License
