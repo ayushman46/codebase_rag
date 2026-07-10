@@ -40,26 +40,27 @@ Instead of searching manually through hundreds of files, the system retrieves on
 
 ## Architecture
 
-```
-React + Vite
-      │
-      ▼
- FastAPI Backend
-      │
- ┌────┴────────────────────┐
- │                         │
- ▼                         ▼
-Ingestion             Query Engine
- │                         │
- ▼                         ▼
-Supabase PostgreSQL with pgvector
+```env
+GROQ_API_KEY=your_groq_key
+GEMINI_API_KEY=your_gemini_key
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+VITE_SUPABASE_URL=your_supabase_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
 ---
 
 ## Technology Stack
 
-### Frontend
+### Supabase URL, Service Role Key, and Anon Key (Postgres Database + Auth)
+1. Go to [supabase.com](https://supabase.com/) and create a free project.
+2. Once the database is provisioned, go to **Project Settings -> API**.
+3. Copy the `Project URL` to `SUPABASE_URL`.
+4. Copy the `service_role / secret` key to `SUPABASE_SERVICE_ROLE_KEY` for the backend.
+5. Copy the same `Project URL` to `VITE_SUPABASE_URL` for the frontend.
+6. Copy the `anon / public` key to `VITE_SUPABASE_ANON_KEY` for the frontend.
+7. Go to the **SQL Editor** in the Supabase dashboard and run the exact SQL command found in `supabase/00_init.sql` to create your tables and enable `pgvector`.
 
 * React
 * Vite

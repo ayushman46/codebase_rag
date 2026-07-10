@@ -2,6 +2,11 @@ import { create } from 'zustand';
 import { getRepos, getStatus, queryRepo } from '../api/client';
 import { supabase } from '../api/supabase';
 
+const getApiErrorMessage = (error, fallback) =>
+  error?.response?.data?.detail ||
+  error?.message ||
+  fallback;
+
 const useStore = create((set, get) => ({
   repos: [],
   selectedRepo: null,
@@ -27,6 +32,17 @@ const useStore = create((set, get) => ({
     }
   },
 
+  signInAnonymously: async () => {
+    try {
+      const { data, error } = await supabase.auth.signInAnonymously();
+      if (error) throw error;
+      set({ user: data.user });
+    } catch (e) {
+      console.error("Anonymous sign-in error:", e);
+      alert("Failed to sign in as guest. Make sure 'Anonymous Sign-ins' is enabled in your Supabase Dashboard under Authentication -> Providers.");
+    }
+  },
+
   signOut: async () => {
     try {
       const { error } = await supabase.auth.signOut();
@@ -47,6 +63,7 @@ const useStore = create((set, get) => ({
       set({ repos: res.data });
     } catch (e) {
       console.error(e);
+      alert(getApiErrorMessage(e, 'Failed to load repositories.'));
     }
   },
 
@@ -92,7 +109,10 @@ const useStore = create((set, get) => ({
       }));
     } catch (e) {
       set((state) => ({
-        messages: [...state.messages, { role: 'assistant', content: 'Sorry, an error occurred.' }],
+        messages: [
+          ...state.messages,
+          { role: 'assistant', content: getApiErrorMessage(e, 'Sorry, an error occurred.') }
+        ],
         isQuerying: false
       }));
     }

@@ -1,16 +1,19 @@
-import os
 import time
 import asyncio
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 class Settings(BaseSettings):
     groq_api_key: str = ""
     gemini_api_key: str = ""
     supabase_url: str = ""
     supabase_key: str = ""
+    supabase_service_role_key: str = ""
     
     model_config = SettingsConfigDict(
-        env_file='../.env', 
+        env_file=str(ENV_FILE),
         env_file_encoding='utf-8', 
         extra='ignore',
         case_sensitive=False
@@ -18,7 +21,12 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-if not all([settings.groq_api_key, settings.gemini_api_key, settings.supabase_url, settings.supabase_key]):
+if not all([
+    settings.groq_api_key,
+    settings.gemini_api_key,
+    settings.supabase_url,
+    settings.supabase_service_role_key or settings.supabase_key
+]):
     print("Warning: Missing one or more API keys in .env file.")
 
 class RateLimiter:

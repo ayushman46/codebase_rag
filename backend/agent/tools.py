@@ -1,5 +1,4 @@
 import json
-from database import supabase
 
 def get_tools_schema():
     return [
@@ -39,15 +38,15 @@ def get_tools_schema():
         }
     ]
 
-def expand_context(repo_id: str, file_path: str) -> str:
-    res = supabase.table('chunks').select('content').eq('repo_id', repo_id).eq('file_path', file_path).order('start_line').execute()
+def expand_context(supabase_client, repo_id: str, file_path: str) -> str:
+    res = supabase_client.table('chunks').select('content').eq('repo_id', repo_id).eq('file_path', file_path).order('start_line').execute()
     if not res.data:
         return "File not found."
     return "\\n".join(c['content'] for c in res.data)
 
-def trace_symbol(repo_id: str, symbol_name: str) -> str:
+def trace_symbol(supabase_client, repo_id: str, symbol_name: str) -> str:
     # Use RPC for FTS search
-    res = supabase.rpc('match_chunks_sparse', {
+    res = supabase_client.rpc('match_chunks_sparse', {
         'p_repo_id': repo_id,
         'p_query': symbol_name,
         'p_limit': 10
@@ -65,12 +64,12 @@ def trace_symbol(repo_id: str, symbol_name: str) -> str:
         return "Symbol not found in exact substring matches."
     return "\\n\\n---\\n\\n".join(matches)
 
-def execute_tool(repo_id: str, tool_name: str, args: dict) -> str:
+def execute_tool(supabase_client, repo_id: str, tool_name: str, args: dict) -> str:
     try:
         if tool_name == "expand_context":
-            return expand_context(repo_id, args.get("file_path", ""))
+            return expand_context(supabase_client, repo_id, args.get("file_path", ""))
         elif tool_name == "trace_symbol":
-            return trace_symbol(repo_id, args.get("symbol_name", ""))
+            return trace_symbol(supabase_client, repo_id, args.get("symbol_name", ""))
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:
