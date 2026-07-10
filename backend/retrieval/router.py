@@ -23,8 +23,14 @@ async def classify_query(question: str) -> str:
         "architecture overview", "project summary", "explain the project",
         "what does this do", "summarize this repo", "what is this about"
     }
+    cached_summary_keywords = {
+        "what does", "what is in", "list all endpoints", "list endpoints",
+        "overview of", "module overview", "file overview"
+    }
     if any(k in q_lower for k in full_context_keywords):
         return "full_context"
+    if any(k in q_lower for k in cached_summary_keywords):
+        return "cached_summary"
 
     await groq_rate_limiter.acquire()
     prompt = ROUTER_PROMPT.format(question=question)
