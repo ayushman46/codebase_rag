@@ -10,7 +10,7 @@ enc = tiktoken.get_encoding("cl100k_base")
 def count_tokens(text: str) -> int:
     return len(enc.encode(text))
 
-async def run_agent_loop(supabase_client, repo_id: str, question: str, initial_context: str):
+async def run_agent_loop(repo_id: str, question: str, initial_context: str):
     system_prompt = (
         "You are an expert software engineer analyzing a codebase.\\n"
         "You have access to tools to search for symbols or read full files.\\n"
@@ -26,38 +26,32 @@ async def run_agent_loop(supabase_client, repo_id: str, question: str, initial_c
     tool_trace = []
     
     for iteration in range(3):
+        # Token Budget Check (~6000 max context allowed by versatile model safely)
+        budget = 6000
+        current_tokens = sum(count_tokens(m.get('content', '') or '') for m in messages)
+        
+        # Drop oldest tool results if over budget
+        while current_tokens > budget and len(messages) > 3:
+            # Try to pop the first tool message
+            for i in range(2, len(messages)-1):
+                if messages[i]['role'] == 'tool' or messages[i].get('tool_calls'):
+                    removed = messages.pop(i)
+                    current_tokens -= count_tokens(removed.get('content', '') or '')
+                    break
+            else:
+                break
+
         await groq_rate_limiter.acquire()
-        try:
-            response = await client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,
-                tools=get_tools_schema(),
-                tool_choice="auto",
-                temperature=0.1
-            )
-        except Exception as e:
-            print(f"Agent loop error: {e}")
-            return build_fallback_answer(question, initial_context), tool_trace
+        response = await client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            tools=get_tools_schema(),
+            tool_choice="auto",
+            temperature=0.1
+        )
         
         msg = response.choices[0].message
-        
-        # Serialize the assistant message manually to maintain clean API schema mapping
-        assistant_message = {
-            "role": "assistant",
-            "content": msg.content
-        }
-        if msg.tool_calls:
-            assistant_message["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                } for tc in msg.tool_calls
-            ]
-        messages.append(assistant_message)
+        messages.append(msg.model_dump(exclude_unset=True))
         
         if not msg.tool_calls:
             return msg.content, tool_trace
@@ -66,12 +60,7 @@ async def run_agent_loop(supabase_client, repo_id: str, question: str, initial_c
             args = json.loads(tool_call.function.arguments)
             tool_name = tool_call.function.name
             
-            result = execute_tool(supabase_client, repo_id, tool_name, args)
-            
-            # Defensively truncate large outputs to stay well within rate/token boundaries
-            max_chars = 3000
-            if len(result) > max_chars:
-                result = result[:max_chars] + f"\n\n... [Content truncated to {max_chars} characters to prevent token limits]"
+            result = execute_tool(repo_id, tool_name, args)
             
             tool_trace.append({
                 "tool": tool_name,
@@ -89,23 +78,9 @@ async def run_agent_loop(supabase_client, repo_id: str, question: str, initial_c
     # Final desperate generation if loop maxes out
     messages.append({"role": "user", "content": "Please provide your final answer based on what you found so far."})
     await groq_rate_limiter.acquire()
-    try:
-        response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.1
-        )
-        return response.choices[0].message.content, tool_trace
-    except Exception as e:
-        print(f"Agent finalization error: {e}")
-        return build_fallback_answer(question, initial_context), tool_trace
-
-
-def build_fallback_answer(question: str, initial_context: str) -> str:
-    snippets = [segment.strip() for segment in initial_context.split("\n\n") if segment.strip()]
-    top_snippets = snippets[:6]
-    summary = "\n\n".join(top_snippets)
-    return (
-        "I could not reach the LLM provider, so here is the retrieved code context "
-        f"that best matches your question:\n\nQuestion: {question}\n\n{summary}"
+    response = await client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0.1
     )
+    return response.choices[0].message.content, tool_trace
