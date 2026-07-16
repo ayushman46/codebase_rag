@@ -3,7 +3,7 @@ import useStore from './store/useStore';
 import RepoInput from './components/RepoInput';
 import RepoList from './components/RepoList';
 import ChatWindow from './components/ChatWindow';
-import { Menu, X, LogOut } from 'lucide-react';
+import { Menu, X, LogOut, ShieldAlert } from 'lucide-react';
 import { supabase } from './api/supabase';
 
 function App() {
@@ -16,7 +16,6 @@ function App() {
     user, 
     setUser, 
     signInWithGoogle, 
-    signInAnonymously,
     signOut 
   } = useStore();
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -152,7 +151,7 @@ function App() {
             </span>
           </div>
           
-          {/* Right: Actions */}
+          {/* Right: Actions (SaaS Sign In/User Profiles) */}
           <div className="flex items-center space-x-6 justify-self-end">
             {selectedRepo && (
               <button 
@@ -174,11 +173,11 @@ function App() {
                     />
                   ) : (
                     <div className="w-7 h-7 rounded-full bg-peach-blush text-burnt-rust flex items-center justify-center text-xs font-bold uppercase">
-                      {user.email ? user.email.slice(0, 2) : 'GS'}
+                      {user.email?.slice(0, 2)}
                     </div>
                   )}
                   <span className="text-xs font-semibold text-charcoal max-w-[100px] truncate hidden md:inline">
-                    {user.user_metadata?.full_name || (user.is_anonymous ? 'Guest' : user.email)}
+                    {user.user_metadata?.full_name || user.email}
                   </span>
                 </div>
                 <button 
@@ -230,24 +229,16 @@ function App() {
                     </div>
                   </>
                 ) : (
-                  <div className="space-y-4 pt-8 max-w-md mx-auto flex flex-col items-center">
-                    <p className="text-body text-pewter leading-relaxed mb-2">
-                      Sign in with Google, or continue as a guest to test the codebase search engine.
+                  <div className="space-y-6 pt-8">
+                    <p className="text-body text-pewter max-w-sm mx-auto leading-relaxed">
+                      Please sign in with Google to index and search codebases.
                     </p>
-                    <div className="flex items-center space-x-4">
-                      <button 
-                        onClick={signInWithGoogle}
-                        className="pill-button text-sm !py-3 !px-6 shadow-none font-medium leading-none"
-                      >
-                        Sign In with Google
-                      </button>
-                      <button 
-                        onClick={signInAnonymously}
-                        className="outline-button text-sm !py-3 !px-6 font-medium leading-none transition-colors hover:bg-pure-white"
-                      >
-                        Continue as Guest
-                      </button>
-                    </div>
+                    <button 
+                      onClick={signInWithGoogle}
+                      className="pill-button inline-flex items-center space-x-2 text-sm !py-3 !px-6 shadow-none font-medium leading-none"
+                    >
+                      <span>Sign In with Google</span>
+                    </button>
                   </div>
                 )}
               </div>

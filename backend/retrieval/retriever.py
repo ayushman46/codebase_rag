@@ -1,34 +1,32 @@
 import asyncio
 from database import supabase
-from ingest.embedder import get_embedding_model
+from ingest.embedder import model as embedding_model
 from typing import List, Dict
 
-async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
+async def retrieve_context(repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
     # 1. Embed query
-    embedding_model = get_embedding_model()
-    query_embedding = embedding_model.encode([query], show_progress_bar=False)[0]
-    query_emb = query_embedding.tolist() if hasattr(query_embedding, "tolist") else list(query_embedding)
+    query_emb = embedding_model.encode([query], show_progress_bar=False)[0].tolist()
     
     # 2. Run queries concurrently via asyncio wrapping Supabase sync calls
     # supabase-py is sync, so we run them in executors to not block the event loop
     loop = asyncio.get_running_loop()
     
     def fetch_dense():
-        return supabase_client.rpc('match_chunks_dense', {
+        return supabase.rpc('match_chunks_dense', {
             'p_repo_id': repo_id,
             'p_query_embedding': query_emb,
             'p_limit': 20
         }).execute()
 
     def fetch_sparse():
-        return supabase_client.rpc('match_chunks_sparse', {
+        return supabase.rpc('match_chunks_sparse', {
             'p_repo_id': repo_id,
             'p_query': query,
             'p_limit': 20
         }).execute()
         
     def fetch_readme():
-        return supabase_client.table('chunks').select('id, file_path, start_line, end_line, language, content')\
+        return supabase.table('chunks').select('id, file_path, start_line, end_line, language, content')\
             .eq('repo_id', repo_id)\
             .ilike('file_path', '%readme.md%')\
             .limit(1).execute()

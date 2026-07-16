@@ -4,6 +4,7 @@ from typing import List, Dict
 import google.generativeai as genai
 from groq import AsyncGroq
 from config import settings, gemini_rate_limiter, groq_rate_limiter
+from database import supabase
 
 genai.configure(api_key=settings.gemini_api_key)
 gemini_model = genai.GenerativeModel('gemini-2.0-flash')
@@ -38,7 +39,7 @@ async def generate_with_groq(prompt: str) -> str:
                 return ""
             await asyncio.sleep(2 ** attempt)
 
-async def build_kt_cache(supabase_client, repo_id: str, chunks: List[Dict]):
+async def build_kt_cache(repo_id: str, chunks: List[Dict]):
     print(f"Building KT Cache for repo_id {repo_id}")
     
     # Group by file
@@ -63,23 +64,9 @@ async def build_kt_cache(supabase_client, repo_id: str, chunks: List[Dict]):
             res = await generate_with_gemini(prompt)
             return file_path, res
 
-    # Limit to top 20 primary code files to avoid massive delays/costs
-    import os
-    valid_extensions = {'.py', '.js', '.jsx', '.ts', '.tsx', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.rb', '.php', '.cs', '.sql'}
-    
-    filtered_files = []
-    for path, file_chunks in files_to_chunks.items():
-        ext = os.path.splitext(path)[1].lower()
-        is_test = any(x in path.lower() for x in ['test', 'spec', 'setupTests'])
-        if ext in valid_extensions and not is_test:
-            # Sort by total content size to prioritize largest modules
-            total_size = sum(len(x) for x in file_chunks)
-            filtered_files.append((path, total_size, file_chunks))
-            
-    filtered_files.sort(key=lambda x: x[1], reverse=True)
-    selected_files = filtered_files[:20]
-    
-    tasks = [summarize_file(path, file_chunks) for path, _, file_chunks in selected_files]
+    # Limit to top 60 files to avoid massive delays/costs
+    file_paths = list(files_to_chunks.keys())[:60]
+    tasks = [summarize_file(path, files_to_chunks[path]) for path in file_paths]
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -125,7 +112,7 @@ async def build_kt_cache(supabase_client, repo_id: str, chunks: List[Dict]):
     onboarding_manual = await generate_with_groq(manual_prompt)
     
     # Save to Supabase
-    supabase_client.table('kt_cache').insert({
+    supabase.table('kt_cache').insert({
         "repo_id": repo_id,
         "tech_stack": tech_stack,
         "onboarding_manual": onboarding_manual,

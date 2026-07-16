@@ -20,10 +20,6 @@ export const supabase = (supabaseUrl && supabaseAnonKey && isValidUrl(supabaseUr
       auth: {
         getSession: async () => ({ data: { session: null } }),
         onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
-        signInAnonymously: async () => {
-          alert("Please configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY inside your .env file to enable authentication.");
-          return { data: { user: null }, error: null };
-        },
         signInWithOAuth: async () => { 
           alert("Please configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY inside your .env file to enable authentication."); 
           return { error: null }; 

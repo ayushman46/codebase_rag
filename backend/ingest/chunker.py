@@ -2,10 +2,6 @@ import os
 import re
 from typing import List, Dict
 
-MAX_LINES_PER_CHUNK = 150
-CHUNK_OVERLAP = 40
-MAX_CHARS_PER_CHUNK = 12000
-
 # Basic boundary patterns for common languages
 BOUNDARY_REGEX = re.compile(
     r"^(?:def|class|function|func|interface|struct)\s+"
@@ -32,8 +28,8 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     
     lines = content.split('\n')
     
-    # 1. If file is small and not obviously minified/generated, treat as single chunk
-    if len(lines) <= 200 and len(content) <= MAX_CHARS_PER_CHUNK:
+    # 1. If file is small, treat as single chunk
+    if len(lines) <= 200:
         return [{
             "file_path": rel_path,
             "start_line": 1,
@@ -41,9 +37,6 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
             "content": content,
             "language": language
         }]
-
-    if is_probably_minified(content, lines):
-        return split_by_characters(content, rel_path, language)
         
     chunks = []
     
@@ -69,7 +62,7 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
         chunk_lines = lines[start_line:end_line]
         
         # If this detected chunk is still huge, split it manually
-        if len(chunk_lines) > 200 or len("\n".join(chunk_lines)) > MAX_CHARS_PER_CHUNK:
+        if len(chunk_lines) > 200:
             sub_chunks = split_by_lines(chunk_lines, start_line + 1, rel_path, language)
             chunks.extend(sub_chunks)
         else:
@@ -86,15 +79,14 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     return chunks
 
 def split_by_lines(lines: List[str], offset_line: int, file_path: str, language: str) -> List[Dict]:
-    """Splits lines into manageable chunks with overlap and a char ceiling."""
+    """Splits lines into chunks of ~150 lines with 40-line overlap."""
+    CHUNK_SIZE = 150
+    OVERLAP = 40
     chunks = []
     
     i = 0
     while i < len(lines):
-        chunk_lines = lines[i:i + MAX_LINES_PER_CHUNK]
-        while len("\n".join(chunk_lines)) > MAX_CHARS_PER_CHUNK and len(chunk_lines) > 20:
-            chunk_lines = chunk_lines[:-10]
-
+        chunk_lines = lines[i:i + CHUNK_SIZE]
         start_line = offset_line + i
         end_line = start_line + len(chunk_lines) - 1
         
@@ -106,44 +98,8 @@ def split_by_lines(lines: List[str], offset_line: int, file_path: str, language:
             "language": language
         })
         
-        if i + MAX_LINES_PER_CHUNK >= len(lines):
+        if i + CHUNK_SIZE >= len(lines):
             break
-        i += max(1, len(chunk_lines) - CHUNK_OVERLAP)
+        i += (CHUNK_SIZE - OVERLAP)
         
     return chunks
-
-
-def split_by_characters(content: str, file_path: str, language: str) -> List[Dict]:
-    chunks = []
-    window = MAX_CHARS_PER_CHUNK
-    overlap = 1500
-    start_idx = 0
-
-    while start_idx < len(content):
-        end_idx = min(len(content), start_idx + window)
-        chunk_text = content[start_idx:end_idx]
-        start_line = content.count("\n", 0, start_idx) + 1
-        end_line = start_line + chunk_text.count("\n")
-
-        chunks.append({
-            "file_path": file_path,
-            "start_line": start_line,
-            "end_line": end_line,
-            "content": chunk_text,
-            "language": language
-        })
-
-        if end_idx >= len(content):
-            break
-        start_idx = max(0, end_idx - overlap)
-
-    return chunks
-
-
-def is_probably_minified(content: str, lines: List[str]) -> bool:
-    if not lines:
-        return False
-
-    longest_line = max(len(line) for line in lines)
-    average_line = len(content) / max(1, len(lines))
-    return longest_line > 2000 or average_line > 400
