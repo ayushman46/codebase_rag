@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -26,6 +27,11 @@ class Settings(BaseSettings):
     cron_secret: str = ""
     ingestion_job_timeout_seconds: int = 900
     max_ingestion_attempts: int = 3
+    # Vercel invokes the durable worker through its authenticated cron route.
+    # For local/self-hosted development, run the same worker in-process so jobs
+    # do not remain queued indefinitely.
+    local_ingestion_worker: bool = True
+    local_ingestion_poll_seconds: float = 3.0
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
@@ -53,6 +59,11 @@ def require_nvidia_api_key() -> str:
 
 def get_cors_origins() -> list[str]:
     return [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+
+
+def should_run_local_ingestion_worker() -> bool:
+    """Use the in-process worker outside Vercel's cron-managed runtime."""
+    return settings.local_ingestion_worker and not bool(os.getenv("VERCEL"))
 
 
 class RateLimiter:

@@ -196,6 +196,8 @@ The backend health endpoint is available at `GET /` and returns:
 {"status":"ok","message":"Codebase Intelligence System API v2"}
 ```
 
+When you run the FastAPI server locally, it now starts a lightweight queue worker automatically. A submitted repository moves from `queued` through cloning, code reading, indexing, and mapping without a separate manual cron request. This worker is disabled automatically on Vercel, where the authenticated Vercel Cron route processes the durable queue instead. Set `LOCAL_INGESTION_WORKER=false` only if you run a separate worker process.
+
 The existing frontend can then be started separately:
 
 ```bash
