@@ -118,6 +118,17 @@ CRON_SECRET=
 
 `SUPABASE_SERVICE_ROLE_KEY` is recommended for backend writes. The frontend uses only the `VITE_` public Supabase settings. `.env` is ignored by Git and must never be committed.
 
+### Google sign-in
+
+The Vite configuration loads the shared `.env` file at the repository root, so local Google sign-in uses the existing `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` values. After pulling changes, stop and restart `npm run dev`; Vite reads environment values only when it starts.
+
+The frontend code starts the Google OAuth flow, but Supabase and Google must also be configured once:
+
+1. In Supabase **Authentication → Sign In / Providers → Google**, enable Google and save the Google client ID and client secret.
+2. In Google Cloud, create a **Web application** OAuth client. Add `http://localhost:5173` and the production Vercel origin as Authorized JavaScript origins.
+3. Copy the Supabase callback URL shown in the Google provider panel (it has the form `https://PROJECT_REF.supabase.co/auth/v1/callback`) into Google's Authorized redirect URIs.
+4. In Supabase **Authentication → URL Configuration**, add `http://localhost:5173` and the Vercel production URL to Redirect URLs. The application sends users back to the current browser origin after authentication.
+
 The backend also supports these optional limits:
 
 ```env
