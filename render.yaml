@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: codebase-rag
+    runtime: python
+    plan: free
+    buildCommand: npm --prefix frontend ci && npm --prefix frontend run build && pip install -r backend/requirements.txt
+    startCommand: uvicorn main:app --app-dir backend --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: VITE_API_BASE_URL
+        value: /api
+      - key: LOCAL_INGESTION_WORKER
+        value: "true"
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: NEMOTRON_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b
+      - key: EMBEDDING_MODEL
+        value: nvidia/nv-embedqa-e5-v5
+      - key: CORS_ORIGINS
+        sync: false

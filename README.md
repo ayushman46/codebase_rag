@@ -150,9 +150,20 @@ The Vercel migration changes the embedding format from 384 to 1024 dimensions. W
 
 If a repository reports `expected 384 dimensions, not 1024`, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
 
-### Vercel deployment
+### Render deployment (free, one service)
 
-This repository deploys the complete application on one Vercel project. There is no Render service and no separately deployed backend URL. The browser calls `/api`, which Vercel sends to the FastAPI function in the same deployment.
+The committed `render.yaml` deploys the complete product as one Render Web Service: its build step creates `frontend/dist`, and FastAPI serves that React application while keeping all backend routes under `/api`. No separate frontend deployment is needed.
+
+1. In Render, select **New → Blueprint**, connect `ayushman46/codebase_rag`, and select the `version2.0` branch. Render reads `render.yaml` and creates one free Web Service.
+2. Enter the values marked as secrets in the Render form: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `NVIDIA_API_KEY`, and (after the first deploy) `CORS_ORIGINS` set to the generated `https://YOUR-SERVICE.onrender.com` URL.
+3. Run the current `supabase/00_init.sql` once in Supabase SQL Editor. In Supabase Auth, set the Site URL and Redirect URL to the generated Render URL. Add that Render URL as a Google OAuth Authorized JavaScript origin; keep the Supabase callback URI as the OAuth redirect URI.
+4. Deploy. Verify `https://YOUR-SERVICE.onrender.com/api/health`, then open the root URL to load the frontend. The Render worker automatically processes queued jobs while the service is awake.
+
+Render's free instance sleeps after 15 minutes with no inbound traffic and may take about a minute to wake. It is suitable for demonstrations and light use; the durable Supabase queue ensures work is not lost if the instance restarts.
+
+### Vercel deployment (optional)
+
+This repository can also deploy as one Vercel project. The browser calls `/api`, which Vercel sends to the FastAPI function in the same deployment.
 
 Use a Vercel Pro project for this application. The committed worker runs every minute and allows a queued ingestion to use up to 800 seconds. Vercel Hobby permits one cron execution per day and a maximum function duration of 300 seconds, so it cannot provide the expected indexing experience.
 
