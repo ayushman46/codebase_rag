@@ -16,7 +16,7 @@ const RepoInput = () => {
       setUrl('');
       await fetchRepos();
     } catch (err) {
-      alert(err?.response?.data?.detail || "Failed to start ingestion");
+      alert("Failed to start ingestion");
     } finally {
       setIngesting(false);
     }
