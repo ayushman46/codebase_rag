@@ -203,7 +203,13 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
         return True
     except Exception as error:
         error_message = explain_supabase_api_error(error)
-        logger.exception("Repository ingestion failed")
+        # Expected configuration mismatches are already turned into a clear,
+        # user-facing diagnosis. Keep unexpected failures traceable without
+        # flooding normal local-development logs with known migration errors.
+        if error_message != str(error):
+            logger.warning("Repository ingestion stopped: %s", error_message)
+        else:
+            logger.exception("Repository ingestion failed")
         if repo_id:
             await run_query(supabase_client.table("repos").update({
                 "status": "failed", "error_message": error_message[:500],

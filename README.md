@@ -148,6 +148,8 @@ Run `supabase/00_init.sql` in the Supabase SQL editor before starting the applic
 
 The Vercel migration changes the embedding format from 384 to 1024 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
 
+If a repository reports `expected 384 dimensions, not 1024`, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
+
 ### Vercel deployment
 
 This repository deploys the complete application on one Vercel project. There is no Render service and no separately deployed backend URL. The browser calls `/api`, which Vercel sends to the FastAPI function in the same deployment.

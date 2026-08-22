@@ -185,6 +185,16 @@ class BackendSmokeTests(unittest.TestCase):
                 assert_supabase_schema()
         assert_supabase_schema.cache_clear()
 
+    def test_embedding_dimension_mismatch_has_an_actionable_migration_message(self):
+        from database import explain_supabase_api_error
+        from postgrest.exceptions import APIError
+
+        message = explain_supabase_api_error(
+            APIError({"message": "expected 384 dimensions, not 1024", "code": "22000"})
+        )
+        self.assertIn("supabase/00_init.sql", message)
+        self.assertIn("1024-dimensional", message)
+
     def test_query_returns_grounded_answer_and_citations(self):
         from main import app
         from api.auth import get_current_user
