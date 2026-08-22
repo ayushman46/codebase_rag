@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 
 from database import assert_supabase_schema, explain_supabase_api_error, supabase
 from ingest.chunker import chunk_file
@@ -50,6 +51,99 @@ async def ensure_repo_record(supabase_client, github_url: str, user_id: str):
         }))
         repo_id = res.data[0]["id"]
     return repo_id, repo_name
+
+
+async def enqueue_ingestion_job(supabase_client, github_url: str, user_id: str, repo_id: str):
+    """Persist work before returning to a serverless request handler."""
+    await run_query(
+        supabase_client.table("ingestion_jobs").upsert(
+            {
+                "repo_id": repo_id,
+                "user_id": user_id,
+                "github_url": github_url,
+                "status": "queued",
+                "attempts": 0,
+                "claimed_at": None,
+                "finished_at": None,
+                "last_error": None,
+            },
+            on_conflict="repo_id",
+        )
+    )
+
+
+async def requeue_stale_jobs(supabase_client):
+    stale_before = (datetime.now(UTC) - timedelta(seconds=settings.ingestion_job_timeout_seconds)).isoformat()
+    stale = await run_query(
+        supabase_client.table("ingestion_jobs").select("id, repo_id, attempts")
+        .eq("status", "processing").lt("claimed_at", stale_before)
+    )
+    for job in stale.data or []:
+        attempts = int(job.get("attempts") or 0)
+        if attempts >= settings.max_ingestion_attempts:
+            error = "Ingestion exceeded the Vercel execution limit after multiple attempts. Use a smaller repository."
+            await run_query(
+                supabase_client.table("ingestion_jobs").update(
+                    {"status": "failed", "claimed_at": None, "finished_at": datetime.now(UTC).isoformat(), "last_error": error}
+                ).eq("id", job["id"])
+            )
+            await run_query(
+                supabase_client.table("repos").update({"status": "failed", "error_message": error}).eq("id", job["repo_id"])
+            )
+        else:
+            await run_query(
+                supabase_client.table("ingestion_jobs").update(
+                    {"status": "queued", "claimed_at": None, "last_error": "Previous worker invocation timed out; retrying."}
+                ).eq("id", job["id"])
+            )
+
+
+async def claim_next_ingestion_job(supabase_client):
+    """Atomically claim at most one queued job, safe when two cron runs overlap."""
+    await requeue_stale_jobs(supabase_client)
+    queued = await run_query(
+        supabase_client.table("ingestion_jobs").select("id, repo_id, user_id, github_url, attempts")
+        .eq("status", "queued").order("created_at").limit(1)
+    )
+    if not queued.data:
+        return None
+
+    job = queued.data[0]
+    claimed = await run_query(
+        supabase_client.table("ingestion_jobs").update(
+            {
+                "status": "processing",
+                "claimed_at": datetime.now(UTC).isoformat(),
+                "attempts": int(job.get("attempts") or 0) + 1,
+                "last_error": None,
+            }
+        ).eq("id", job["id"]).eq("status", "queued")
+    )
+    return job if claimed.data else None
+
+
+async def process_one_queued_ingestion(supabase_client):
+    """Run a durable ingestion job. The cron endpoint intentionally processes one job per invocation."""
+    job = await claim_next_ingestion_job(supabase_client)
+    if not job:
+        return {"processed": False}
+
+    succeeded = await run_ingestion_for_repo(
+        supabase_client,
+        job["github_url"],
+        job["user_id"],
+        job["repo_id"],
+    )
+    await run_query(
+        supabase_client.table("ingestion_jobs").update(
+            {
+                "status": "completed" if succeeded else "failed",
+                "finished_at": datetime.now(UTC).isoformat(),
+                "claimed_at": None,
+            }
+        ).eq("id", job["id"])
+    )
+    return {"processed": True, "repo_id": job["repo_id"], "succeeded": succeeded}
 
 
 async def run_ingestion(github_url: str, user_id: str):
@@ -106,6 +200,7 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
         await run_query(supabase_client.table("repos").update({
             "status": "ready", "chunk_count": len(embedded_chunks), "error_message": None,
         }).eq("id", repo_id))
+        return True
     except Exception as error:
         error_message = explain_supabase_api_error(error)
         logger.exception("Repository ingestion failed")
@@ -113,6 +208,7 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
             await run_query(supabase_client.table("repos").update({
                 "status": "failed", "error_message": error_message[:500],
             }).eq("id", repo_id))
+        return False
     finally:
         if repo_path:
             try:

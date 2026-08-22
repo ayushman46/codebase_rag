@@ -26,9 +26,14 @@ class BackendSmokeTests(unittest.TestCase):
     def test_app_imports_and_root_endpoint_works(self):
         from main import app
 
-        response = TestClient(app).get("/")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
+        client = TestClient(app)
+        self.assertEqual(client.get("/").status_code, 200)
+        self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
+
+    def test_vercel_cron_endpoint_requires_its_secret(self):
+        from main import app
+
+        self.assertEqual(TestClient(app).get("/api/internal/process-ingestions").status_code, 401)
 
     def test_github_url_normalization_rejects_non_repository_urls(self):
         self.assertEqual(
@@ -74,13 +79,16 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(chunk["content"] for chunk in chunks))
 
-    def test_embed_chunks_uses_the_loaded_model(self):
+    def test_embed_chunks_uses_hosted_nvidia_embeddings(self):
         chunks = [{"file_path": "src/app.py", "content": "def hello(): pass", "start_line": 1, "end_line": 1, "language": "py"}]
-        fake_model = MagicMock()
-        fake_model.encode.return_value = [[0.0] * EMBEDDING_DIMENSION]
-        with patch("ingest.embedder.get_embedding_model", return_value=fake_model):
+        fake_client = MagicMock()
+        fake_client.embeddings.create.return_value = SimpleNamespace(
+            data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]
+        )
+        with patch("ingest.embedder.get_embedding_client", return_value=fake_client):
             embedded = embed_chunks(chunks)
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
+        self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
 
     def test_nemotron_request_uses_required_model_and_hides_reasoning(self):
         from agent.nemotron import complete
@@ -139,10 +147,8 @@ class BackendSmokeTests(unittest.TestCase):
             def table(self, _name):
                 return FakeRequest(readme)
 
-        fake_model = MagicMock()
-        fake_model.encode.return_value = [[0.0] * EMBEDDING_DIMENSION]
         async def run_test():
-            with patch("retrieval.retriever.get_embedding_model", return_value=fake_model):
+            with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
                 return await retrieve_context(FakeSupabase(), "repo-1", "login", top_k=2)
         results = asyncio.run(run_test())
         self.assertEqual([chunk["id"] for chunk in results], ["readme", "a"])
@@ -239,11 +245,12 @@ class BackendSmokeTests(unittest.TestCase):
         with patch("api.ingest_router.assert_supabase_schema"), \
              patch("api.ingest_router.get_user_scoped_supabase", return_value=MagicMock()), \
              patch("api.ingest_router.ensure_repo_record", new=AsyncMock(return_value=("repo-1", "demo"))), \
-             patch("api.ingest_router.run_ingestion_for_repo", new=AsyncMock()):
+             patch("api.ingest_router.enqueue_ingestion_job", new=AsyncMock()) as enqueue:
             response = TestClient(app).post("/api/ingest", json={"github_url": "https://github.com/octocat/demo"})
         app.dependency_overrides.clear()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["repo_name"], "demo")
+        enqueue.assert_awaited_once()
 
 
 if __name__ == "__main__":

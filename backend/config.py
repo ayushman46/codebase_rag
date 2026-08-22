@@ -11,16 +11,21 @@ class Settings(BaseSettings):
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     nemotron_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
+    embedding_model: str = "nvidia/nv-embedqa-e5-v5"
     nvidia_timeout_seconds: float = 90.0
     nvidia_calls_per_minute: int = 20
     supabase_url: str = ""
     supabase_key: str = ""
     supabase_service_role_key: str = ""
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
-    max_repository_files: int = 10_000
-    max_repository_bytes: int = 50_000_000
-    max_repository_chunks: int = 20_000
+    # Keep queued Vercel Function work safely within its configured duration.
+    max_repository_files: int = 5_000
+    max_repository_bytes: int = 25_000_000
+    max_repository_chunks: int = 1_500
     max_context_characters: int = 60_000
+    cron_secret: str = ""
+    ingestion_job_timeout_seconds: int = 900
+    max_ingestion_attempts: int = 3
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),

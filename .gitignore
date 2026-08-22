@@ -18,6 +18,7 @@ __pycache__/
 venv/
 ENV/
 repos_temp/
+frontend/dist/
 
 # OS files
 .DS_Store

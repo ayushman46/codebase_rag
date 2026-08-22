@@ -77,6 +77,7 @@ def assert_supabase_schema():
     try:
         supabase.table("repos").select("id").limit(1).execute()
         supabase.table("chunks").select("symbols").limit(1).execute()
+        supabase.table("ingestion_jobs").select("id").limit(1).execute()
     except DatabaseConfigurationError:
         raise
     except APIError as e:
