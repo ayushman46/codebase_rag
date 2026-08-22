@@ -1,6 +1,3 @@
-import hashlib
-import math
-import re
 from typing import List, Dict
 from sentence_transformers import SentenceTransformer
 
@@ -9,9 +6,8 @@ EMBEDDING_DIMENSION = 384
 _model = None
 
 
-class HashingEmbedder:
-    def encode(self, texts, show_progress_bar=False, batch_size=None):
-        return [hash_embed(text) for text in texts]
+class EmbeddingUnavailableError(RuntimeError):
+    pass
 
 
 def get_embedding_model():
@@ -21,12 +17,11 @@ def get_embedding_model():
 
     try:
         _model = SentenceTransformer(EMBEDDING_MODEL_NAME, local_files_only=True)
-    except Exception:
-        try:
-            _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        except Exception as e:
-            print(f"Warning: falling back to hashing embeddings: {e}")
-            _model = HashingEmbedder()
+    except Exception as error:
+        raise EmbeddingUnavailableError(
+            "The local embedding model is unavailable. Pre-download "
+            f"{EMBEDDING_MODEL_NAME} before ingesting repositories."
+        ) from error
 
     return _model
 
@@ -53,20 +48,3 @@ def embed_chunks(chunks: List[Dict]) -> List[Dict]:
             chunk['embedding'] = emb.tolist() if hasattr(emb, "tolist") else list(emb)
         
     return chunks
-
-
-def hash_embed(text: str) -> List[float]:
-    vector = [0.0] * EMBEDDING_DIMENSION
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_./:-]*", text.lower())
-
-    for token in tokens[:4000]:
-        digest = hashlib.md5(token.encode("utf-8")).digest()
-        index = int.from_bytes(digest[:2], "big") % EMBEDDING_DIMENSION
-        sign = 1.0 if digest[2] % 2 == 0 else -1.0
-        vector[index] += sign
-
-    norm = math.sqrt(sum(v * v for v in vector))
-    if norm == 0:
-        return vector
-
-    return [v / norm for v in vector]

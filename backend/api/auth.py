@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from fastapi import Security, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from database import supabase, DatabaseConfigurationError, explain_supabase_api_error
+from database import supabase, DatabaseConfigurationError
 
 security = HTTPBearer()
 
@@ -27,6 +27,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
             access_token=token,
             raw_user=user_res.user
         )
+    except HTTPException:
+        raise
     except DatabaseConfigurationError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -35,5 +37,5 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication failed: {explain_supabase_api_error(e)}"
+            detail="Authentication failed. Sign in again and retry."
         )

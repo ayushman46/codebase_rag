@@ -1,7 +1,7 @@
 import asyncio
-from database import supabase
+from typing import Dict, List
+
 from ingest.embedder import get_embedding_model
-from typing import List, Dict
 
 async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
     # 1. Embed query
@@ -39,9 +39,9 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
         loop.run_in_executor(None, fetch_readme)
     )
     
-    dense_chunks = dense_res.data
-    sparse_chunks = sparse_res.data
-    readme_chunks = readme_res.data
+    dense_chunks = dense_res.data or []
+    sparse_chunks = sparse_res.data or []
+    readme_chunks = readme_res.data or []
 
     # 3. Reciprocal Rank Fusion
     scores = {}
@@ -61,13 +61,10 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
     # Sort by RRF score
     sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
     
-    # 4. Take Top K
+    # 4. Use the README as a tie-breaking architectural anchor, without exceeding K.
     final_chunks = [chunk_map[c_id] for c_id in sorted_ids[:top_k]]
-    
-    # 5. Always add README
     if readme_chunks:
         readme = readme_chunks[0]
-        if not any(c['id'] == readme['id'] for c in final_chunks):
-            final_chunks.insert(0, readme)
-            
+        if not any(chunk['id'] == readme['id'] for chunk in final_chunks):
+            final_chunks = [readme] + final_chunks[:max(0, top_k - 1)]
     return final_chunks

@@ -1,48 +1,73 @@
-from fastapi import APIRouter, HTTPException, Depends
-from database import assert_supabase_schema, DatabaseConfigurationError, get_user_scoped_supabase
-from api.auth import get_current_user
+import asyncio
+import logging
 
+from fastapi import APIRouter, Depends, HTTPException
+
+from api.auth import get_current_user
+from database import DatabaseConfigurationError, assert_supabase_schema, get_user_scoped_supabase
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
-@router.get("/status/{repo_name}")
-def get_status(repo_name: str, current_user = Depends(get_current_user)):
+
+async def run_query(query):
+    return await asyncio.to_thread(query.execute)
+
+
+async def scoped_client(access_token: str):
     try:
         assert_supabase_schema()
-    except DatabaseConfigurationError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        return get_user_scoped_supabase(access_token)
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
-    supabase = get_user_scoped_supabase(current_user.access_token)
-    res = supabase.table('repos').select('*').eq('repo_name', repo_name).eq('user_id', current_user.id).execute()
+
+@router.get("/status/{repo_name}")
+async def get_status(repo_name: str, current_user=Depends(get_current_user)):
+    supabase_client = await scoped_client(current_user.access_token)
+    try:
+        res = await run_query(
+            supabase_client.table("repos").select("status, chunk_count, error_message")
+            .eq("repo_name", repo_name).eq("user_id", current_user.id)
+        )
+    except Exception as error:
+        logger.exception("Could not fetch repository status")
+        raise HTTPException(status_code=502, detail="Could not fetch repository status.") from error
     if not res.data:
-        raise HTTPException(status_code=404, detail="Repo not found")
-    repo = res.data[0]
-    return {
-        "status": repo['status'],
-        "chunk_count": repo['chunk_count'],
-        "error_message": repo['error_message']
-    }
+        raise HTTPException(status_code=404, detail="Repository not found.")
+    return res.data[0]
+
 
 @router.get("/repos")
-def list_repos(current_user = Depends(get_current_user)):
+async def list_repos(current_user=Depends(get_current_user)):
+    supabase_client = await scoped_client(current_user.access_token)
     try:
-        assert_supabase_schema()
-    except DatabaseConfigurationError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        res = await run_query(
+            supabase_client.table("repos")
+            .select("id, repo_name, github_url, status, chunk_count, created_at, error_message")
+            .eq("user_id", current_user.id).order("created_at", desc=True)
+        )
+        return res.data
+    except Exception as error:
+        logger.exception("Could not list repositories")
+        raise HTTPException(status_code=502, detail="Could not list repositories.") from error
 
-    supabase = get_user_scoped_supabase(current_user.access_token)
-    res = supabase.table('repos')\
-        .select('id, repo_name, github_url, status, chunk_count, created_at, error_message')\
-        .eq('user_id', current_user.id)\
-        .order('created_at', desc=True).execute()
-    return res.data
 
 @router.delete("/repos/{repo_name}")
-def delete_repo(repo_name: str, current_user = Depends(get_current_user)):
+async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
+    supabase_client = await scoped_client(current_user.access_token)
     try:
-        assert_supabase_schema()
-    except DatabaseConfigurationError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-    supabase = get_user_scoped_supabase(current_user.access_token)
-    supabase.table('repos').delete().eq('repo_name', repo_name).eq('user_id', current_user.id).execute()
-    return {"message": f"Repo {repo_name} deleted successfully"}
+        existing = await run_query(
+            supabase_client.table("repos").select("id").eq("repo_name", repo_name).eq("user_id", current_user.id)
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Repository not found.")
+        await run_query(
+            supabase_client.table("repos").delete().eq("repo_name", repo_name).eq("user_id", current_user.id)
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("Could not delete repository")
+        raise HTTPException(status_code=502, detail="Could not delete repository.") from error
+    return {"message": f"Repository {repo_name} deleted successfully"}

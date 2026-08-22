@@ -1,9 +1,7 @@
 fastapi
 uvicorn
-groq
-google-generativeai
+openai
 sentence-transformers
 supabase
 GitPython
 pydantic-settings
-tiktoken

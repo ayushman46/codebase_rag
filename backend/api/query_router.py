@@ -1,105 +1,95 @@
-import time
 import asyncio
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from database import assert_supabase_schema, DatabaseConfigurationError, explain_supabase_api_error, get_user_scoped_supabase
-from retrieval.router import classify_query
-from retrieval.retriever import retrieve_context
-from agent.agent import run_agent_loop
-from ingest.summarizer import generate_with_gemini
-from api.auth import get_current_user
+import logging
+import time
 
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from agent.agent import run_agent_loop
+from agent.nemotron import LLMProviderError
+from api.auth import get_current_user
+from config import ModelConfigurationError, require_nvidia_api_key, settings
+from database import DatabaseConfigurationError, get_user_scoped_supabase
+from database import assert_supabase_schema, explain_supabase_api_error
+from retrieval.retriever import retrieve_context
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 async def run_query(query):
     return await asyncio.to_thread(query.execute)
 
+
 class QueryRequest(BaseModel):
-    repo_name: str
-    question: str
+    repo_name: str = Field(min_length=1, max_length=200)
+    question: str = Field(min_length=1, max_length=4_000)
+
+
+def build_context(chunks: list[dict]) -> str:
+    remaining = settings.max_context_characters
+    sections: list[str] = []
+    for chunk in chunks:
+        header = (
+            f"File: {chunk['file_path']} (L{chunk['start_line']}-L{chunk['end_line']})"
+            f"\nSymbols: {', '.join(chunk.get('symbols') or []) or 'not detected'}\n"
+        )
+        budget = remaining - len(header) - 2
+        if budget <= 0:
+            break
+        content = chunk["content"][:budget]
+        sections.append(f"{header}{content}")
+        remaining -= len(header) + len(content) + 2
+    return "\n\n".join(sections)
+
 
 @router.post("/query")
-async def query_repo(req: QueryRequest, current_user = Depends(get_current_user)):
+async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
     start_time = time.time()
     try:
         assert_supabase_schema()
-    except DatabaseConfigurationError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        require_nvidia_api_key()
+        supabase_client = get_user_scoped_supabase(current_user.access_token)
+        res = await run_query(
+            supabase_client.table("repos").select("id, status").eq("repo_name", req.repo_name).eq("user_id", current_user.id)
+        )
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Repository not found.")
+        repo = res.data[0]
+        if repo["status"] != "ready":
+            raise HTTPException(status_code=409, detail=f"Repository is not ready (status: {repo['status']}).")
 
-    supabase = get_user_scoped_supabase(current_user.access_token)
-    
-    # Get repo_id scoped by user_id
-    res = await run_query(
-        supabase.table('repos').select('id, status').eq('repo_name', req.repo_name).eq('user_id', current_user.id)
-    )
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    
-    repo = res.data[0]
-    if repo['status'] != 'ready':
-        raise HTTPException(status_code=400, detail=f"Repository is not ready. Status: {repo['status']}")
-        
-    repo_id = repo['id']
-    question = req.question
-    
-    try:
-        mode = await classify_query(question)
-        
-        answer = ""
-        citations = []
-        tool_calls = []
-        
-        if mode == "cached_summary":
-            kt_res = await run_query(supabase.table('kt_cache').select('*').eq('repo_id', repo_id))
-            if kt_res.data:
-                cache = kt_res.data[0]
-                answer = f"**Tech Stack:** {', '.join(cache.get('tech_stack', []))}\\n\\n"
-                answer += f"**Onboarding Manual:**\\n{cache.get('onboarding_manual', '')}\\n"
-            else:
-                mode = "rag"
-                
-        if mode == "full_context":
-            # Pull chunks up to Gemini's free limits
-            chunks_res = await run_query(
-                supabase.table('chunks').select('file_path, content').eq('repo_id', repo_id).limit(500)
-            )
-            full_text = "\\n\\n".join([f"--- {c['file_path']} ---\\n{c['content']}" for c in chunks_res.data])
-            prompt = f"Codebase Context:\\n{full_text}\\n\\nQuestion: {question}\\nAnswer comprehensively."
-            answer = await generate_with_gemini(prompt)
-            if not answer.strip():
-                mode = "rag"
-            
-        if mode == "rag":
-            chunks = await retrieve_context(supabase, repo_id, question)
-            context = "\\n\\n".join([f"File: {c['file_path']} (L{c['start_line']}-L{c['end_line']})\\n{c['content']}" for c in chunks])
-            
-            for c in chunks:
-                citations.append({
-                    "file_path": c['file_path'],
-                    "start_line": c['start_line'],
-                    "content": c['content'],
-                    "language": c['language']
-                })
-                
-            answer, tool_calls = await run_agent_loop(supabase, repo_id, question, context)
-            
-        latency = int((time.time() - start_time) * 1000)
-        
+        question = req.question.strip()
+        if not question:
+            raise HTTPException(status_code=422, detail="Question must contain non-whitespace text.")
+        chunks = await retrieve_context(supabase_client, repo["id"], question)
+        if not chunks:
+            raise HTTPException(status_code=422, detail="No repository evidence was available for this question.")
+        context = build_context(chunks)
+        if not context:
+            raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
+        answer, tool_calls = await run_agent_loop(supabase_client, repo["id"], question, context)
+        citations = [{
+            "file_path": chunk["file_path"],
+            "start_line": chunk["start_line"],
+            "end_line": chunk["end_line"],
+            "content": chunk["content"],
+            "language": chunk["language"],
+            "symbols": chunk.get("symbols", []),
+        } for chunk in chunks]
         return {
-            "answer": answer,
-            "mode": mode,
-            "citations": citations,
-            "tool_calls": tool_calls,
-            "latency_ms": latency,
-            "tokens_used": 0
+            "answer": answer, "mode": "rag", "citations": citations, "tool_calls": tool_calls,
+            "latency_ms": int((time.time() - start_time) * 1000), "tokens_used": 0,
         }
-    except Exception as e:
-        print(f"Query error: {e}")
-        return {
-            "answer": explain_supabase_api_error(e) if "row-level security" in str(e).lower() else "I encountered an error processing your request.",
-            "mode": "error",
-            "citations": [],
-            "tool_calls": [],
-            "latency_ms": int((time.time() - start_time) * 1000)
-        }
+    except HTTPException:
+        raise
+    except (ModelConfigurationError, DatabaseConfigurationError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except LLMProviderError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Repository query failed")
+        detail = explain_supabase_api_error(error)
+        if "row-level security" in detail.lower():
+            raise HTTPException(status_code=403, detail=detail) from error
+        raise HTTPException(status_code=500, detail="Could not process the repository query.") from error

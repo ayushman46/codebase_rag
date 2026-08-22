@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List, Dict
+from typing import Dict, List
 
 MAX_LINES_PER_CHUNK = 150
 CHUNK_OVERLAP = 40
@@ -14,6 +14,22 @@ BOUNDARY_REGEX = re.compile(
     re.MULTILINE
 )
 
+SYMBOL_REGEX = re.compile(
+    r"^\s*(?:async\s+)?(?:def|class|function|func|interface|struct|enum)\s+([A-Za-z_$][\w$]*)"
+    r"|^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>",
+    re.MULTILINE,
+)
+
+
+def extract_symbols(content: str) -> List[str]:
+    """Return declaration names in source order, without pretending to parse an AST."""
+    symbols: List[str] = []
+    for match in SYMBOL_REGEX.finditer(content):
+        symbol = next((group for group in match.groups() if group), None)
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols[:50]
+
 def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     """
     Reads a file and splits it into logical chunks using a regex boundary heuristic.
@@ -24,13 +40,16 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
             content = f.read()
     except Exception:
         return []
+    if not content.strip():
+        return []
         
     rel_path = os.path.relpath(filepath, repo_path)
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
     language = ext[1:] if ext else "text"
     
-    lines = content.split('\n')
+    # splitlines avoids manufacturing a non-existent extra line for a final newline.
+    lines = content.splitlines()
     
     # 1. If file is small and not obviously minified/generated, treat as single chunk
     if len(lines) <= 200 and len(content) <= MAX_CHARS_PER_CHUNK:
@@ -39,7 +58,8 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
             "start_line": 1,
             "end_line": len(lines),
             "content": content,
-            "language": language
+            "language": language,
+            "symbols": extract_symbols(content),
         }]
 
     if is_probably_minified(content, lines):
@@ -56,9 +76,6 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     boundaries.append(len(lines))
     
     # Process boundaries
-    current_chunk_lines = []
-    start_idx = 0
-    
     for i in range(len(boundaries) - 1):
         start_line = boundaries[i]
         end_line = boundaries[i+1]
@@ -78,7 +95,8 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
                 "start_line": start_line + 1,
                 "end_line": end_line,
                 "content": "\n".join(chunk_lines),
-                "language": language
+                "language": language,
+                "symbols": extract_symbols("\n".join(chunk_lines)),
             })
             
     # Filter empty chunks
@@ -103,7 +121,8 @@ def split_by_lines(lines: List[str], offset_line: int, file_path: str, language:
             "start_line": start_line,
             "end_line": end_line,
             "content": "\n".join(chunk_lines),
-            "language": language
+            "language": language,
+            "symbols": extract_symbols("\n".join(chunk_lines)),
         })
         
         if i + MAX_LINES_PER_CHUNK >= len(lines):
@@ -123,14 +142,16 @@ def split_by_characters(content: str, file_path: str, language: str) -> List[Dic
         end_idx = min(len(content), start_idx + window)
         chunk_text = content[start_idx:end_idx]
         start_line = content.count("\n", 0, start_idx) + 1
-        end_line = start_line + chunk_text.count("\n")
+        line_count = max(1, len(chunk_text.splitlines()))
+        end_line = start_line + line_count - 1
 
         chunks.append({
             "file_path": file_path,
             "start_line": start_line,
             "end_line": end_line,
             "content": chunk_text,
-            "language": language
+            "language": language,
+            "symbols": extract_symbols(chunk_text),
         })
 
         if end_idx >= len(content):

@@ -1,11 +1,14 @@
 import base64
 import json
+import logging
 from functools import lru_cache
 from typing import Optional
 
 from postgrest.exceptions import APIError
 from supabase import create_client
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 class DatabaseConfigurationError(RuntimeError):
     pass
@@ -52,22 +55,18 @@ def build_supabase_client(access_token: Optional[str] = None):
     
     # Check for empty or placeholder values
     if not url or not key or "your_supabase_url_here" in url or "your_supabase_anon_key_here" in key:
-        print(f"\n[ERROR] {message}\n")
+        logger.warning("Supabase configuration is incomplete")
         return DeferredSupabaseClient(message)
         
     try:
         if not settings.supabase_service_role_key and not looks_like_service_role_key(key):
-            print(
-                "\n[WARN] Backend is not using a Supabase service role key. "
-                "Writes may fail due to row-level security. Set SUPABASE_SERVICE_ROLE_KEY in .env.\n"
-            )
+            logger.warning("Backend is not using a Supabase service role key; writes may be blocked by RLS")
         client = create_client(url, key)
         if access_token and not settings.supabase_service_role_key:
             client.postgrest.auth(access_token)
         return client
-    except Exception as e:
-        print(f"\n[ERROR] Failed to initialize Supabase client: {e}")
-        print("Please verify that SUPABASE_URL in your .env is a valid URL starting with http:// or https://\n")
+    except Exception:
+        logger.exception("Failed to initialize Supabase client")
         return DeferredSupabaseClient(message)
 
 supabase = get_supabase_client()
@@ -77,15 +76,26 @@ supabase = get_supabase_client()
 def assert_supabase_schema():
     try:
         supabase.table("repos").select("id").limit(1).execute()
+        supabase.table("chunks").select("symbols").limit(1).execute()
     except DatabaseConfigurationError:
         raise
     except APIError as e:
-        if getattr(e, "code", "") == "PGRST205" or "schema cache" in str(e):
+        if (
+            getattr(e, "code", "") in {"PGRST204", "PGRST205", "42703"}
+            or "schema cache" in str(e).lower()
+            or "does not exist" in str(e).lower()
+        ):
             raise DatabaseConfigurationError(
-                "Supabase schema is not initialized. Run /Users/ayush/Downloads/codebase_rag/supabase/00_init.sql "
-                "in your Supabase SQL editor, then restart the backend."
-            )
-        raise
+                "Supabase schema is not initialized. Run supabase/00_init.sql in the Supabase SQL editor, "
+                "then restart the backend."
+            ) from e
+        raise DatabaseConfigurationError(
+            "Supabase schema could not be verified. Check the Supabase configuration and retry."
+        ) from e
+    except Exception as e:
+        raise DatabaseConfigurationError(
+            "Supabase is currently unavailable. Check the connection configuration and retry."
+        ) from e
 
 
 def explain_supabase_api_error(error: Exception) -> str:
