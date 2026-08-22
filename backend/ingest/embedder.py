@@ -13,7 +13,7 @@ class EmbeddingUnavailableError(RuntimeError):
 
 
 def get_embedding_client():
-    """Return the lightweight hosted-embedding client used on Vercel."""
+    """Return the hosted NVIDIA embedding client."""
     global _client
     if _client is None:
         _client = OpenAI(

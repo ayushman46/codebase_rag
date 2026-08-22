@@ -1,8 +1,0 @@
-backend/venv
-backend/.venv
-frontend/node_modules
-repos_temp
-**/__pycache__
-**/*.pyc
-.env
-.env.local

@@ -8,7 +8,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from config import get_cors_origins, should_run_local_ingestion_worker
 from api.ingest_router import router as ingest_router
-from api.ingestion_worker import router as ingestion_worker_router
 from api.query_router import router as query_router
 from api.repos_router import router as repos_router
 from ingest.local_worker import process_queue_forever
@@ -16,7 +15,7 @@ from ingest.local_worker import process_queue_forever
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Start an automatic queue worker locally; Vercel uses its cron route."""
+    """Start the automatic ingestion worker with the application."""
     worker_task = None
     if should_run_local_ingestion_worker():
         worker_task = asyncio.create_task(process_queue_forever(), name="local-ingestion-worker")
@@ -52,7 +51,6 @@ app.add_middleware(
 app.include_router(ingest_router, prefix="/api")
 app.include_router(query_router, prefix="/api")
 app.include_router(repos_router, prefix="/api")
-app.include_router(ingestion_worker_router, prefix="/api/internal")
 
 @app.get("/api/health", include_in_schema=False)
 def health_check():
@@ -73,8 +71,7 @@ if FRONTEND_DIST.is_dir():
             return FileResponse(requested_file)
         return FileResponse(FRONTEND_DIST / "index.html")
 else:
-    # Local API-only startup and Vercel Functions do not package frontend/dist;
-    # Vercel serves its static output separately through vercel.json rewrites.
+    # Local API-only startup does not package frontend/dist.
     @app.get("/")
     def read_root():
         return {"status": "ok", "message": "Codebase Intelligence System API v2"}

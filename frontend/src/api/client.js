@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const api = axios.create({
   // Local development keeps the existing FastAPI port. Production uses the
-  // same Vercel origin, so browser requests never need a separate backend URL.
+  // same origin, so browser requests never need a separate backend URL.
   baseURL: import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8000/api' : '/api'),
 });
 

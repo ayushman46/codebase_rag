@@ -81,7 +81,7 @@ async def requeue_stale_jobs(supabase_client):
     for job in stale.data or []:
         attempts = int(job.get("attempts") or 0)
         if attempts >= settings.max_ingestion_attempts:
-            error = "Ingestion exceeded the Vercel execution limit after multiple attempts. Use a smaller repository."
+            error = "Ingestion timed out repeatedly. Use a smaller repository and submit it again."
             await run_query(
                 supabase_client.table("ingestion_jobs").update(
                     {"status": "failed", "claimed_at": None, "finished_at": datetime.now(UTC).isoformat(), "last_error": error}
