@@ -14,16 +14,19 @@ const isValidUrl = (url) => {
 };
 
 // Defensive fallback client in case .env keys are not yet configured
-export const supabase = (supabaseUrl && supabaseAnonKey && isValidUrl(supabaseUrl))
+export const isSupabaseConfigured = Boolean(
+  supabaseUrl && supabaseAnonKey && isValidUrl(supabaseUrl)
+);
+
+export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey)
   : {
       auth: {
         getSession: async () => ({ data: { session: null } }),
         onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
-        signInWithOAuth: async () => { 
-          alert("Please configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY inside your .env file to enable authentication."); 
-          return { error: null }; 
-        },
+        signInWithOAuth: async () => ({
+          error: new Error('Supabase authentication is not configured.'),
+        }),
         signOut: async () => ({ error: null })
       }
     };
