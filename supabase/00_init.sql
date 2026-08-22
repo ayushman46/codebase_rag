@@ -35,7 +35,7 @@ alter table chunks add column if not exists symbols text[] not null default '{}'
 -- Drop before a possible vector-dimension change; it is recreated below.
 drop index if exists chunks_embedding_idx;
 
--- Vercel uses NVIDIA's hosted 1024-dimensional embedding API instead of the
+-- The application uses NVIDIA's hosted 1024-dimensional embedding API instead of the
 -- heavyweight local PyTorch model. Existing 384-dimensional rows cannot be
 -- compared with the new vectors, so intentionally clear them and require a
 -- one-time re-index after this migration.
@@ -61,7 +61,7 @@ begin
     update repos
       set status = 'failed',
           chunk_count = 0,
-          error_message = 'Embeddings were upgraded for the Vercel deployment. Re-ingest this repository.';
+          error_message = 'Embeddings were upgraded. Re-ingest this repository.';
     execute 'alter table chunks alter column embedding type vector(1024) using null::vector(1024)';
   end if;
 end;
@@ -83,7 +83,7 @@ create table if not exists kt_cache (
 
 alter table kt_cache enable row level security;
 
--- Durable work queue for Vercel Cron. The API records a job before returning,
+-- Durable work queue. The API records a job before returning,
 -- while the private cron endpoint claims and processes one job at a time.
 create table if not exists ingestion_jobs (
   id uuid primary key default gen_random_uuid(),
@@ -268,7 +268,7 @@ using (
   )
 );
 
--- Browser clients never access queue rows; Vercel's backend uses the
+-- Browser clients never access queue rows; the backend uses the
 -- Supabase service-role key, which bypasses RLS.
 create policy ingestion_jobs_service_role_only on ingestion_jobs
 for all

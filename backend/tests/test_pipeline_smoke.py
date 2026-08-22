@@ -30,11 +30,6 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(client.get("/").status_code, 200)
         self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
 
-    def test_vercel_cron_endpoint_requires_its_secret(self):
-        from main import app
-
-        self.assertEqual(TestClient(app).get("/api/internal/process-ingestions").status_code, 401)
-
     def test_github_url_normalization_rejects_non_repository_urls(self):
         self.assertEqual(
             normalize_github_url(" https://github.com/octocat/Hello-World/ "),

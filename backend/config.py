@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 from pathlib import Path
 
@@ -19,17 +18,14 @@ class Settings(BaseSettings):
     supabase_key: str = ""
     supabase_service_role_key: str = ""
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
-    # Keep queued Vercel Function work safely within its configured duration.
+    # Protect the service from excessively large repository ingestion jobs.
     max_repository_files: int = 5_000
     max_repository_bytes: int = 25_000_000
     max_repository_chunks: int = 1_500
     max_context_characters: int = 60_000
-    cron_secret: str = ""
     ingestion_job_timeout_seconds: int = 900
     max_ingestion_attempts: int = 3
-    # Vercel invokes the durable worker through its authenticated cron route.
-    # For local/self-hosted development, run the same worker in-process so jobs
-    # do not remain queued indefinitely.
+    # Run the durable worker in-process so jobs do not remain queued indefinitely.
     local_ingestion_worker: bool = True
     local_ingestion_poll_seconds: float = 3.0
 
@@ -62,8 +58,8 @@ def get_cors_origins() -> list[str]:
 
 
 def should_run_local_ingestion_worker() -> bool:
-    """Use the in-process worker outside Vercel's cron-managed runtime."""
-    return settings.local_ingestion_worker and not bool(os.getenv("VERCEL"))
+    """Return whether this service instance should process queued ingestion jobs."""
+    return settings.local_ingestion_worker
 
 
 class RateLimiter:
