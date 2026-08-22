@@ -1,32 +1,34 @@
 import asyncio
-from database import supabase
-from ingest.embedder import model as embedding_model
-from typing import List, Dict
+from typing import Dict, List
 
-async def retrieve_context(repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
+from ingest.embedder import get_embedding_model
+
+async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
     # 1. Embed query
-    query_emb = embedding_model.encode([query], show_progress_bar=False)[0].tolist()
+    embedding_model = get_embedding_model()
+    query_embedding = embedding_model.encode([query], show_progress_bar=False)[0]
+    query_emb = query_embedding.tolist() if hasattr(query_embedding, "tolist") else list(query_embedding)
     
     # 2. Run queries concurrently via asyncio wrapping Supabase sync calls
     # supabase-py is sync, so we run them in executors to not block the event loop
     loop = asyncio.get_running_loop()
     
     def fetch_dense():
-        return supabase.rpc('match_chunks_dense', {
+        return supabase_client.rpc('match_chunks_dense', {
             'p_repo_id': repo_id,
             'p_query_embedding': query_emb,
             'p_limit': 20
         }).execute()
 
     def fetch_sparse():
-        return supabase.rpc('match_chunks_sparse', {
+        return supabase_client.rpc('match_chunks_sparse', {
             'p_repo_id': repo_id,
             'p_query': query,
             'p_limit': 20
         }).execute()
         
     def fetch_readme():
-        return supabase.table('chunks').select('id, file_path, start_line, end_line, language, content')\
+        return supabase_client.table('chunks').select('id, file_path, start_line, end_line, language, content')\
             .eq('repo_id', repo_id)\
             .ilike('file_path', '%readme.md%')\
             .limit(1).execute()
@@ -37,9 +39,9 @@ async def retrieve_context(repo_id: str, query: str, top_k: int = 8) -> List[Dic
         loop.run_in_executor(None, fetch_readme)
     )
     
-    dense_chunks = dense_res.data
-    sparse_chunks = sparse_res.data
-    readme_chunks = readme_res.data
+    dense_chunks = dense_res.data or []
+    sparse_chunks = sparse_res.data or []
+    readme_chunks = readme_res.data or []
 
     # 3. Reciprocal Rank Fusion
     scores = {}
@@ -59,13 +61,10 @@ async def retrieve_context(repo_id: str, query: str, top_k: int = 8) -> List[Dic
     # Sort by RRF score
     sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
     
-    # 4. Take Top K
+    # 4. Use the README as a tie-breaking architectural anchor, without exceeding K.
     final_chunks = [chunk_map[c_id] for c_id in sorted_ids[:top_k]]
-    
-    # 5. Always add README
     if readme_chunks:
         readme = readme_chunks[0]
-        if not any(c['id'] == readme['id'] for c in final_chunks):
-            final_chunks.insert(0, readme)
-            
+        if not any(chunk['id'] == readme['id'] for chunk in final_chunks):
+            final_chunks = [readme] + final_chunks[:max(0, top_k - 1)]
     return final_chunks

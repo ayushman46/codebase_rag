@@ -1,6 +1,10 @@
 import os
 import re
-from typing import List, Dict
+from typing import Dict, List
+
+MAX_LINES_PER_CHUNK = 150
+CHUNK_OVERLAP = 40
+MAX_CHARS_PER_CHUNK = 12000
 
 # Basic boundary patterns for common languages
 BOUNDARY_REGEX = re.compile(
@@ -9,6 +13,22 @@ BOUNDARY_REGEX = re.compile(
     r"|^(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*=>",
     re.MULTILINE
 )
+
+SYMBOL_REGEX = re.compile(
+    r"^\s*(?:async\s+)?(?:def|class|function|func|interface|struct|enum)\s+([A-Za-z_$][\w$]*)"
+    r"|^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>",
+    re.MULTILINE,
+)
+
+
+def extract_symbols(content: str) -> List[str]:
+    """Return declaration names in source order, without pretending to parse an AST."""
+    symbols: List[str] = []
+    for match in SYMBOL_REGEX.finditer(content):
+        symbol = next((group for group in match.groups() if group), None)
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols[:50]
 
 def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     """
@@ -20,23 +40,30 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
             content = f.read()
     except Exception:
         return []
+    if not content.strip():
+        return []
         
     rel_path = os.path.relpath(filepath, repo_path)
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
     language = ext[1:] if ext else "text"
     
-    lines = content.split('\n')
+    # splitlines avoids manufacturing a non-existent extra line for a final newline.
+    lines = content.splitlines()
     
-    # 1. If file is small, treat as single chunk
-    if len(lines) <= 200:
+    # 1. If file is small and not obviously minified/generated, treat as single chunk
+    if len(lines) <= 200 and len(content) <= MAX_CHARS_PER_CHUNK:
         return [{
             "file_path": rel_path,
             "start_line": 1,
             "end_line": len(lines),
             "content": content,
-            "language": language
+            "language": language,
+            "symbols": extract_symbols(content),
         }]
+
+    if is_probably_minified(content, lines):
+        return split_by_characters(content, rel_path, language)
         
     chunks = []
     
@@ -49,9 +76,6 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     boundaries.append(len(lines))
     
     # Process boundaries
-    current_chunk_lines = []
-    start_idx = 0
-    
     for i in range(len(boundaries) - 1):
         start_line = boundaries[i]
         end_line = boundaries[i+1]
@@ -62,7 +86,7 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
         chunk_lines = lines[start_line:end_line]
         
         # If this detected chunk is still huge, split it manually
-        if len(chunk_lines) > 200:
+        if len(chunk_lines) > 200 or len("\n".join(chunk_lines)) > MAX_CHARS_PER_CHUNK:
             sub_chunks = split_by_lines(chunk_lines, start_line + 1, rel_path, language)
             chunks.extend(sub_chunks)
         else:
@@ -71,7 +95,8 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
                 "start_line": start_line + 1,
                 "end_line": end_line,
                 "content": "\n".join(chunk_lines),
-                "language": language
+                "language": language,
+                "symbols": extract_symbols("\n".join(chunk_lines)),
             })
             
     # Filter empty chunks
@@ -79,14 +104,15 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     return chunks
 
 def split_by_lines(lines: List[str], offset_line: int, file_path: str, language: str) -> List[Dict]:
-    """Splits lines into chunks of ~150 lines with 40-line overlap."""
-    CHUNK_SIZE = 150
-    OVERLAP = 40
+    """Splits lines into manageable chunks with overlap and a char ceiling."""
     chunks = []
     
     i = 0
     while i < len(lines):
-        chunk_lines = lines[i:i + CHUNK_SIZE]
+        chunk_lines = lines[i:i + MAX_LINES_PER_CHUNK]
+        while len("\n".join(chunk_lines)) > MAX_CHARS_PER_CHUNK and len(chunk_lines) > 20:
+            chunk_lines = chunk_lines[:-10]
+
         start_line = offset_line + i
         end_line = start_line + len(chunk_lines) - 1
         
@@ -95,11 +121,50 @@ def split_by_lines(lines: List[str], offset_line: int, file_path: str, language:
             "start_line": start_line,
             "end_line": end_line,
             "content": "\n".join(chunk_lines),
-            "language": language
+            "language": language,
+            "symbols": extract_symbols("\n".join(chunk_lines)),
         })
         
-        if i + CHUNK_SIZE >= len(lines):
+        if i + MAX_LINES_PER_CHUNK >= len(lines):
             break
-        i += (CHUNK_SIZE - OVERLAP)
+        i += max(1, len(chunk_lines) - CHUNK_OVERLAP)
         
     return chunks
+
+
+def split_by_characters(content: str, file_path: str, language: str) -> List[Dict]:
+    chunks = []
+    window = MAX_CHARS_PER_CHUNK
+    overlap = 1500
+    start_idx = 0
+
+    while start_idx < len(content):
+        end_idx = min(len(content), start_idx + window)
+        chunk_text = content[start_idx:end_idx]
+        start_line = content.count("\n", 0, start_idx) + 1
+        line_count = max(1, len(chunk_text.splitlines()))
+        end_line = start_line + line_count - 1
+
+        chunks.append({
+            "file_path": file_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "content": chunk_text,
+            "language": language,
+            "symbols": extract_symbols(chunk_text),
+        })
+
+        if end_idx >= len(content):
+            break
+        start_idx = max(0, end_idx - overlap)
+
+    return chunks
+
+
+def is_probably_minified(content: str, lines: List[str]) -> bool:
+    if not lines:
+        return False
+
+    longest_line = max(len(line) for line in lines)
+    average_line = len(content) / max(1, len(lines))
+    return longest_line > 2000 or average_line > 400
