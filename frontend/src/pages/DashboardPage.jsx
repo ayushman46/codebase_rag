@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ChatWindow from '../components/ChatWindow';
+import IngestionProgress, { isIngestionActive } from '../components/IngestionProgress';
 import RepoInput from '../components/RepoInput';
 import RepoList from '../components/RepoList';
 import SiteHeader from '../components/SiteHeader';
@@ -9,6 +10,7 @@ import useStore from '../store/useStore';
 const DashboardPage = () => {
   const { repos, selectedRepo, setSelectedRepo } = useStore();
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const activeRepos = repos.filter((repo) => isIngestionActive(repo.status));
 
   useEffect(() => {
     if (selectedRepo) setIsDrawerOpen(false);
@@ -34,6 +36,11 @@ const DashboardPage = () => {
             <h1 className="heading-display mt-6 text-display text-ink-black">Understand any codebase.</h1>
             <p className="mx-auto mt-6 max-w-md text-body leading-relaxed text-pewter">Paste a public GitHub repository link to ingest and analyze it in your private workspace.</p>
             <div className="mx-auto mt-10 max-w-xl"><RepoInput /></div>
+            {activeRepos.length > 0 && (
+              <div className="mx-auto mt-8 max-w-xl space-y-3">
+                {activeRepos.map((repo) => <IngestionProgress key={repo.id} repo={repo} />)}
+              </div>
+            )}
             {repos.length > 0 && <button onClick={() => setIsDrawerOpen(true)} className="mt-6 text-sm font-semibold text-ember-orange hover:text-burnt-rust">Browse {repos.length} indexed {repos.length === 1 ? 'codebase' : 'codebases'}</button>}
           </section>
         ) : (
