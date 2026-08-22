@@ -6,7 +6,7 @@ The application preserves source file paths, chunk boundaries, languages, declar
 
 ## What the system does
 
-An authenticated user submits a public GitHub repository through the existing web interface. The backend validates and shallow-clones the repository, filters irrelevant content, chunks supported text files, extracts lightweight symbol metadata, generates local embeddings, and stores the result in Supabase. Later questions use hybrid vector and keyword retrieval before NVIDIA Nemotron generates a grounded answer.
+An authenticated user submits a public GitHub repository through the existing web interface. The backend validates and shallow-clones the repository, filters irrelevant content, chunks supported text files, extracts lightweight symbol metadata, creates hosted embeddings, and stores the result in Supabase. Later questions use hybrid vector and keyword retrieval before NVIDIA Nemotron generates a grounded answer. The repository deploys as one Vercel project: Vite serves the web app and FastAPI serves the same-origin `/api` routes.
 
 Typical questions include:
 
@@ -20,11 +20,11 @@ Typical questions include:
 
 ```text
 React frontend
-    -> FastAPI API with Supabase bearer-token authentication
-    -> repository record and background ingestion job
+    -> /api in the same Vercel deployment -> FastAPI API with Supabase bearer-token authentication
+    -> repository record and Supabase-backed durable ingestion job
     -> shallow Git clone and file filtering
     -> chunking, line ranges, language and symbol metadata
-    -> local MiniLM embeddings and Supabase pgvector storage
+    -> NVIDIA hosted embeddings and Supabase pgvector storage
     -> hybrid dense and keyword retrieval
     -> bounded, cited repository context
     -> NVIDIA Nemotron final answer
@@ -42,7 +42,7 @@ The ingestion pipeline is implemented in `backend/ingest`.
 4. Repository-wide file, byte, and chunk limits protect the service from oversized input.
 5. Files are split at common declaration boundaries when possible and otherwise use overlapping line windows. Chunk line ranges are calculated from the actual source file.
 6. Lightweight regular expressions record declared functions, classes, interfaces, structs, enums, and common JavaScript arrow functions. They supplement retrieval metadata; they are not presented as a full parser.
-7. `sentence-transformers/all-MiniLM-L6-v2` produces 384-dimensional embeddings locally.
+7. NVIDIA `nvidia/nv-embedqa-e5-v5` produces hosted 1024-dimensional passage embeddings, keeping the Vercel Function bundle small.
 8. Chunks and metadata are written to Supabase in bounded batches. A deterministic repository metadata cache records languages, files, directories, and detected symbols without adding an ingestion-time model dependency.
 
 If a clone, embedding, or indexing step fails, the repository is marked `failed` and receives a safe diagnostic message. The exact temporary clone directory is cleaned up in all cases.
@@ -51,7 +51,7 @@ If a clone, embedding, or indexing step fails, the repository is marked `failed`
 
 `backend/retrieval/retriever.py` combines two Supabase RPC searches:
 
-- Dense cosine-similarity search over MiniLM embeddings.
+- Dense cosine-similarity search over NVIDIA embeddings.
 - Sparse PostgreSQL full-text search over source content.
 
 Reciprocal rank fusion combines the result sets. A README chunk is included as an architectural anchor when available, without exceeding the retrieval limit. The context builder then enforces a character budget before the model receives evidence.
@@ -75,7 +75,7 @@ The current frontend uses ordinary JSON responses rather than a streaming protoc
 - Frontend: React, Vite, Zustand, Supabase JavaScript client
 - API: Python, FastAPI, Uvicorn
 - Authentication and storage: Supabase Auth, PostgreSQL, pgvector, PostgREST
-- Embeddings: Sentence Transformers, `all-MiniLM-L6-v2`
+- Embeddings: NVIDIA `nvidia/nv-embedqa-e5-v5` through the OpenAI-compatible API
 - Answer generation: NVIDIA Nemotron through the OpenAI-compatible Python client
 - Git ingestion: GitPython
 
@@ -94,6 +94,8 @@ backend/
 supabase/
   00_init.sql      schema, RLS policies, pgvector, and retrieval RPCs
 frontend/          frozen React application
+api/index.py        Vercel FastAPI entry point
+vercel.json         single-project Vite, FastAPI function, and ingestion cron configuration
 ```
 
 ## Configuration
@@ -103,42 +105,82 @@ Copy `.env.example` to `.env` and set the values required by the deployment:
 ```env
 NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+NEMOTRON_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+EMBEDDING_MODEL=nvidia/nv-embedqa-e5-v5
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+VITE_API_BASE_URL=http://localhost:8000/api
+CRON_SECRET=
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` is recommended for backend writes. The frontend uses only the `VITE_` public Supabase settings. `.env` is ignored by Git and must never be committed.
+
+### Google sign-in
+
+The Vite configuration loads the shared `.env` file at the repository root, so local Google sign-in uses the existing `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` values. After pulling changes, stop and restart `npm run dev`; Vite reads environment values only when it starts.
+
+The frontend code starts the Google OAuth flow, but Supabase and Google must also be configured once:
+
+1. In Supabase **Authentication → Sign In / Providers → Google**, enable Google and save the Google client ID and client secret.
+2. In Google Cloud, create a **Web application** OAuth client. Add `http://localhost:5173` and the production Vercel origin as Authorized JavaScript origins.
+3. Copy the Supabase callback URL shown in the Google provider panel (it has the form `https://PROJECT_REF.supabase.co/auth/v1/callback`) into Google's Authorized redirect URIs.
+4. In Supabase **Authentication → URL Configuration**, add `http://localhost:5173` and the Vercel production URL to Redirect URLs. The application sends users back to the current browser origin after authentication.
 
 The backend also supports these optional limits:
 
 ```env
 NVIDIA_TIMEOUT_SECONDS=90
 NVIDIA_CALLS_PER_MINUTE=20
-MAX_REPOSITORY_FILES=10000
-MAX_REPOSITORY_BYTES=50000000
-MAX_REPOSITORY_CHUNKS=20000
+MAX_REPOSITORY_FILES=5000
+MAX_REPOSITORY_BYTES=25000000
+MAX_REPOSITORY_CHUNKS=1500
 MAX_CONTEXT_CHARACTERS=60000
+INGESTION_JOB_TIMEOUT_SECONDS=900
+MAX_INGESTION_ATTEMPTS=3
 ```
 
 ### Supabase schema
 
-Run `supabase/00_init.sql` in the Supabase SQL editor before starting the application. It creates the pgvector extension, tables, row-level-security policies, `symbols` metadata column, and both retrieval RPCs.
+Run `supabase/00_init.sql` in the Supabase SQL editor before starting the application. It creates the pgvector extension, tables, row-level-security policies, `symbols` metadata column, durable `ingestion_jobs` queue, and both retrieval RPCs.
 
-Existing deployments created before the symbol-metadata change must run the updated SQL file and restart the backend. The backend reports this condition as a `503` configuration error instead of attempting ingestion against an incompatible schema.
+The Vercel migration changes the embedding format from 384 to 1024 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
 
-### Embedding model
+If a repository reports `expected 384 dimensions, not 1024`, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
 
-The embedding model must be available locally before the first ingestion. The backend deliberately does not substitute hash vectors, because that would make retrieval appear to work while losing semantic quality.
+### Vercel deployment
 
-For an environment without a cached model, download it once while network access is available:
+This repository deploys the complete application on one Vercel project. There is no Render service and no separately deployed backend URL. The browser calls `/api`, which Vercel sends to the FastAPI function in the same deployment.
 
-```bash
-cd backend
-./venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
-```
+Use a Vercel Pro project for this application. The committed worker runs every minute and allows a queued ingestion to use up to 800 seconds. Vercel Hobby permits one cron execution per day and a maximum function duration of 300 seconds, so it cannot provide the expected indexing experience.
+
+1. Push this branch to GitHub, open [Vercel's New Project page](https://vercel.com/new), and import `ayushman46/codebase_rag` with the repository root as the project root. Do not set the root directory to `frontend`.
+2. Keep the build settings supplied by `vercel.json`. They install and build `frontend`, publish `frontend/dist`, and deploy `api/index.py` plus `backend/**` as the Python function.
+3. In **Project Settings → Environment Variables**, add the following values to **Production** and **Preview**. `VITE_` variables are public build-time values; the other values are server-only secrets.
+
+   | Variable | Value |
+   | --- | --- |
+   | `VITE_API_BASE_URL` | `/api` |
+   | `VITE_SUPABASE_URL` | Supabase project URL |
+   | `VITE_SUPABASE_ANON_KEY` | Supabase anon/publishable key |
+   | `SUPABASE_URL` | Same Supabase project URL |
+   | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key, server-only |
+   | `NVIDIA_API_KEY` | NVIDIA API key, server-only |
+   | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` |
+   | `NEMOTRON_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` |
+   | `EMBEDDING_MODEL` | `nvidia/nv-embedqa-e5-v5` |
+   | `CRON_SECRET` | A newly generated long random secret, server-only |
+   | `CORS_ORIGINS` | `https://YOUR-PRODUCTION-DOMAIN` |
+
+   Generate `CRON_SECRET` locally with `openssl rand -base64 48`. Never put the service-role key, NVIDIA key, or cron secret in a `VITE_` variable.
+4. In Supabase, run the complete current `supabase/00_init.sql` file once in the SQL Editor. Read the migration warning above first: this clears pre-Vercel embeddings and requires re-indexing those repositories.
+5. In **Supabase Authentication → URL Configuration**, set the Site URL to the Vercel production URL. Add that exact URL to Redirect URLs and add `https://*-YOUR-VERCEL-TEAM.vercel.app/**` for preview deployments. Also include localhost if local development is still required.
+6. Deploy to production from Vercel. `vercel.json` registers `/api/internal/process-ingestions` as a private production cron route; Vercel automatically authenticates it with `CRON_SECRET`. Cron does not run on preview deployments, so manually call that route with the secret only when preview testing is necessary.
+7. Verify `https://YOUR-PRODUCTION-DOMAIN/api/health` returns `{"status":"ok"}`. Sign in, submit a small public GitHub repository, confirm its status changes from `queued` through processing to `ready`, then ask a question and confirm its citations are returned.
+
+The deployment intentionally processes one repository job per cron invocation. It is bounded to 5,000 files, 25 MB of source, and 1,500 chunks to fit Vercel function limits. A timed-out job is retried up to three times and then marked failed with a user-visible message.
 
 ## Local installation and startup
 
@@ -156,6 +198,8 @@ The backend health endpoint is available at `GET /` and returns:
 {"status":"ok","message":"Codebase Intelligence System API v2"}
 ```
 
+When you run the FastAPI server locally, it now starts a lightweight queue worker automatically. A submitted repository moves from `queued` through cloning, code reading, indexing, and mapping without a separate manual cron request. This worker is disabled automatically on Vercel, where the authenticated Vercel Cron route processes the durable queue instead. Set `LOCAL_INGESTION_WORKER=false` only if you run a separate worker process.
+
 The existing frontend can then be started separately:
 
 ```bash
@@ -170,7 +214,7 @@ All repository endpoints require a Supabase bearer token, which the existing fro
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/ingest` | Validate a public GitHub URL, create/reset a repository record, and start ingestion. |
+| `POST /api/ingest` | Validate a public GitHub URL, create/reset a repository record, and queue durable ingestion. |
 | `POST /api/query` | Retrieve repository evidence and return a grounded Nemotron answer with citations. |
 | `GET /api/repos` | List repositories owned by the authenticated user. |
 | `GET /api/status/{repo_name}` | Return indexing state, chunk count, and safe failure message. |
@@ -208,10 +252,10 @@ The current suite covers application import/startup, API validation and response
 
 The following verification was executed during the current implementation work:
 
-- Python compilation and 14 backend tests passed.
+- Python compilation and the backend test suite passed.
 - The FastAPI application started successfully and served `GET /` with HTTP 200.
 - A public GitHub repository was cloned, filtered, chunked, and cleaned up successfully.
-- The local embedding model produced a 384-dimensional vector.
+- NVIDIA's embedding API produced a 1024-dimensional vector.
 - A live NVIDIA Nemotron request succeeded using the configured environment key.
 
 ## Security and operational notes
@@ -221,7 +265,7 @@ The following verification was executed during the current implementation work:
 - Temporary clone cleanup is constrained to the configured temporary repository directory.
 - User repository access is scoped by authenticated user ID and reinforced by Supabase row-level-security policies.
 - The backend uses configured CORS origins rather than credentialed wildcard CORS.
-- Background tasks run inside the FastAPI process. A production deployment that requires durable job execution across process restarts should replace this mechanism with a queue or worker before relying on long-running large-repository ingestion.
+- Ingestion jobs are persisted in Supabase before the API returns. Vercel Cron claims one job at a time, so function restarts do not silently lose queued work.
 
 ## Current limitations and extension points
 

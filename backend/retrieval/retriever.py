@@ -1,13 +1,11 @@
 import asyncio
 from typing import Dict, List
 
-from ingest.embedder import get_embedding_model
+from ingest.embedder import embed_query
 
 async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
     # 1. Embed query
-    embedding_model = get_embedding_model()
-    query_embedding = embedding_model.encode([query], show_progress_bar=False)[0]
-    query_emb = query_embedding.tolist() if hasattr(query_embedding, "tolist") else list(query_embedding)
+    query_emb = await asyncio.to_thread(embed_query, query)
     
     # 2. Run queries concurrently via asyncio wrapping Supabase sync calls
     # supabase-py is sync, so we run them in executors to not block the event loop

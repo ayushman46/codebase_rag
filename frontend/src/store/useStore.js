@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { getRepos, getStatus, queryRepo } from '../api/client';
-import { supabase } from '../api/supabase';
+import { isSupabaseConfigured, supabase } from '../api/supabase';
 
 const useStore = create((set, get) => ({
   repos: [],
@@ -8,11 +8,23 @@ const useStore = create((set, get) => ({
   messages: [],
   isQuerying: false,
   isIngesting: false,
+  isSigningIn: false,
+  authError: null,
   user: null,
 
   setUser: (user) => set({ user }),
 
+  clearAuthError: () => set({ authError: null }),
+
   signInWithGoogle: async () => {
+    if (!isSupabaseConfigured) {
+      set({
+        authError: 'Google sign-in is unavailable because Supabase environment variables are missing.',
+      });
+      return;
+    }
+
+    set({ isSigningIn: true, authError: null });
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
@@ -23,7 +35,9 @@ const useStore = create((set, get) => ({
       if (error) throw error;
     } catch (e) {
       console.error("Sign-in error:", e);
-      alert("Failed to initialize Google Sign-In");
+      set({ authError: e.message || 'Google sign-in could not be started. Please try again.' });
+    } finally {
+      set({ isSigningIn: false });
     }
   },
 

@@ -24,13 +24,48 @@ create table if not exists chunks (
   language text,
   symbols text[] not null default '{}',
   content text not null,
-  embedding vector(384),
+  embedding vector(1024),
   content_tsv tsvector generated always as (to_tsvector('english', content)) stored,
   created_at timestamptz default now()
 );
 
 -- Safe for existing projects created before symbol metadata was introduced.
 alter table chunks add column if not exists symbols text[] not null default '{}';
+
+-- Drop before a possible vector-dimension change; it is recreated below.
+drop index if exists chunks_embedding_idx;
+
+-- Vercel uses NVIDIA's hosted 1024-dimensional embedding API instead of the
+-- heavyweight local PyTorch model. Existing 384-dimensional rows cannot be
+-- compared with the new vectors, so intentionally clear them and require a
+-- one-time re-index after this migration.
+do $$
+declare
+  existing_dimension integer;
+begin
+  select a.atttypmod - 4
+    into existing_dimension
+  from pg_attribute a
+  join pg_class c on c.oid = a.attrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public'
+    and c.relname = 'chunks'
+    and a.attname = 'embedding'
+    and not a.attisdropped;
+
+  if existing_dimension is not null and existing_dimension <> 1024 then
+    delete from chunks;
+    if to_regclass('public.kt_cache') is not null then
+      delete from kt_cache;
+    end if;
+    update repos
+      set status = 'failed',
+          chunk_count = 0,
+          error_message = 'Embeddings were upgraded for the Vercel deployment. Re-ingest this repository.';
+    execute 'alter table chunks alter column embedding type vector(1024) using null::vector(1024)';
+  end if;
+end;
+$$;
 
 alter table chunks enable row level security;
 
@@ -48,12 +83,30 @@ create table if not exists kt_cache (
 
 alter table kt_cache enable row level security;
 
+-- Durable work queue for Vercel Cron. The API records a job before returning,
+-- while the private cron endpoint claims and processes one job at a time.
+create table if not exists ingestion_jobs (
+  id uuid primary key default gen_random_uuid(),
+  repo_id uuid not null references repos(id) on delete cascade unique,
+  user_id uuid not null,
+  github_url text not null,
+  status text not null default 'queued' check (status in ('queued', 'processing', 'completed', 'failed')),
+  attempts int not null default 0,
+  claimed_at timestamptz,
+  finished_at timestamptz,
+  last_error text,
+  created_at timestamptz not null default now()
+);
+
+alter table ingestion_jobs enable row level security;
+create index if not exists ingestion_jobs_status_created_idx on ingestion_jobs (status, created_at);
+
 -- Recreate the RPCs so an existing deployment receives the symbols column too.
 drop function if exists match_chunks_dense(uuid, vector, int);
 drop function if exists match_chunks_sparse(uuid, text, int);
 
 -- RPC for Dense Search
-create or replace function match_chunks_dense(p_repo_id uuid, p_query_embedding vector(384), p_limit int)
+create or replace function match_chunks_dense(p_repo_id uuid, p_query_embedding vector(1024), p_limit int)
 returns table(id uuid, file_path text, start_line int, end_line int, language text, symbols text[], content text, score float)
 language plpgsql
 as $$
@@ -80,6 +133,7 @@ drop policy if exists kt_cache_select_own on kt_cache;
 drop policy if exists kt_cache_insert_own on kt_cache;
 drop policy if exists kt_cache_update_own on kt_cache;
 drop policy if exists kt_cache_delete_own on kt_cache;
+drop policy if exists ingestion_jobs_service_role_only on ingestion_jobs;
 
 create policy repos_select_own on repos
 for select
@@ -213,6 +267,14 @@ using (
       and repos.user_id = auth.uid()
   )
 );
+
+-- Browser clients never access queue rows; Vercel's backend uses the
+-- Supabase service-role key, which bypasses RLS.
+create policy ingestion_jobs_service_role_only on ingestion_jobs
+for all
+to service_role
+using (true)
+with check (true);
 
 -- RPC for Sparse Search
 create or replace function match_chunks_sparse(p_repo_id uuid, p_query text, p_limit int)

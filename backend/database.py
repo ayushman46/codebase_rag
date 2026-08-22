@@ -77,6 +77,7 @@ def assert_supabase_schema():
     try:
         supabase.table("repos").select("id").limit(1).execute()
         supabase.table("chunks").select("symbols").limit(1).execute()
+        supabase.table("ingestion_jobs").select("id").limit(1).execute()
     except DatabaseConfigurationError:
         raise
     except APIError as e:
@@ -101,7 +102,14 @@ def assert_supabase_schema():
 def explain_supabase_api_error(error: Exception) -> str:
     if isinstance(error, APIError):
         message = str(error)
-        if "row-level security" in message.lower():
+        normalized_message = message.lower()
+        if "dimensions" in normalized_message and "1024" in normalized_message and "expected" in normalized_message:
+            return (
+                "Your Supabase database still uses 384-dimensional embeddings, but this application uses NVIDIA "
+                "1024-dimensional embeddings. Run the current supabase/00_init.sql in the Supabase SQL Editor once, "
+                "then submit this repository again. Existing code chunks will be rebuilt during re-indexing."
+            )
+        if "row-level security" in normalized_message:
             return (
                 "Supabase denied the write because the backend is not using a service role key. "
                 "Set SUPABASE_SERVICE_ROLE_KEY in /Users/ayush/Downloads/codebase_rag/.env "

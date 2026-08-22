@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 openai
-sentence-transformers
 supabase
 GitPython
 pydantic-settings
