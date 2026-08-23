@@ -7,14 +7,14 @@ const LandingPage = () => {
   const { authError, clearAuthError, user } = useStore();
 
   return (
-    <main className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-6xl flex-col justify-center px-5 py-16 sm:px-8">
-      <section className="grid items-center gap-12 lg:grid-cols-[1.1fr_.9fr] lg:gap-20">
-        <div className="space-y-8">
+    <main className="content-shell landing-page page-section">
+      <section className="grid items-center gap-10 lg:grid-cols-[1.1fr_.9fr] lg:gap-16 xl:gap-20">
+        <div className="max-w-xl space-y-8">
           <div className="inline-flex items-center gap-2 rounded-full border border-sand bg-pure-white px-3 py-1.5 text-caption font-semibold uppercase tracking-widest text-warm-gray">
             <LockKeyhole className="h-3.5 w-3.5 text-ember-orange" /> Private workspace
           </div>
           <div className="space-y-5">
-            <h1 className="heading-display max-w-2xl text-display text-ink-black">Know the code before you change it.</h1>
+            <h1 className="heading-display landing-title max-w-2xl text-ink-black">Know the code before you change it.</h1>
             <p className="max-w-xl text-lg leading-relaxed text-pewter">
               Sign in to build a private, source-grounded workspace for every public GitHub repository you investigate.
             </p>
@@ -40,7 +40,7 @@ const LandingPage = () => {
           )}
         </div>
 
-        <div className="rounded-[32px] border border-sand bg-pure-white p-6 shadow-[0_20px_70px_rgba(48,38,31,0.08)] sm:p-8">
+        <div className="w-full rounded-[32px] border border-sand bg-pure-white p-6 shadow-[0_20px_70px_rgba(48,38,31,0.08)] sm:p-8">
           <div className="mb-8 flex items-center justify-between border-b border-sand pb-5">
             <div>
               <p className="text-sm font-semibold text-ink-black">Workspace preview</p>
@@ -67,7 +67,7 @@ const LandingPage = () => {
         </div>
       </section>
 
-      <section className="mt-20 grid gap-6 border-t border-sand pt-10 sm:grid-cols-3">
+      <section className="mt-14 grid gap-4 border-t border-sand pt-8 sm:mt-20 sm:grid-cols-3 sm:gap-6 sm:pt-10">
         {['Google-backed access', 'Source citations', 'Private workspaces'].map((item) => (
           <div key={item} className="flex items-center gap-2 text-sm font-semibold text-charcoal"><CheckCircle2 className="h-4 w-4 text-ember-orange" />{item}</div>
         ))}

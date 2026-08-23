@@ -11,11 +11,11 @@ const sections = [
 const DocsPage = () => {
   const { user } = useStore();
   return (
-    <main className="mx-auto max-w-6xl px-5 py-16 sm:px-8">
-      <div className="grid gap-12 lg:grid-cols-[240px_1fr]">
-        <aside className="lg:sticky lg:top-8 lg:h-fit">
+    <main className="content-shell page-section">
+      <div className="grid gap-10 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-12">
+        <aside className="border-b border-sand pb-6 lg:sticky lg:top-24 lg:h-fit lg:border-b-0 lg:pb-0">
           <p className="text-caption font-semibold uppercase tracking-widest text-ember-orange">Documentation</p>
-          <nav className="mt-6 space-y-3 border-l border-sand pl-4 text-sm">
+          <nav className="mt-5 flex flex-wrap gap-x-5 gap-y-3 text-sm lg:mt-6 lg:block lg:space-y-3 lg:border-l lg:border-sand lg:pl-4">
             <a href="#getting-started" className="block text-charcoal hover:text-ember-orange">Getting started</a>
             <a href="#repository-flow" className="block text-warm-gray hover:text-ember-orange">Repository flow</a>
             <a href="#privacy" className="block text-warm-gray hover:text-ember-orange">Privacy and access</a>
@@ -28,7 +28,7 @@ const DocsPage = () => {
             <p className="mt-6 text-lg leading-relaxed text-pewter">Codebase Intel is designed for codebase exploration. The application only unlocks a workspace after Google authentication, keeping repository records isolated to the signed-in user.</p>
             <Link to={user ? '/app' : '/'} className="mt-8 inline-flex items-center gap-2 text-sm font-semibold text-ember-orange hover:text-burnt-rust">{user ? 'Open your workspace' : 'Sign in to get started'} <ArrowRight className="h-4 w-4" /></Link>
           </section>
-          <section id="repository-flow" className="mt-16 border-t border-sand pt-12">
+          <section id="repository-flow" className="mt-14 border-t border-sand pt-10 sm:mt-16 sm:pt-12">
             <h2 className="heading-sm text-heading text-ink-black">Repository flow</h2>
             <div className="mt-8 space-y-5">
               {sections.map(({ icon: Icon, step, title, text }) => (
@@ -40,7 +40,7 @@ const DocsPage = () => {
               ))}
             </div>
           </section>
-          <section id="privacy" className="mt-16 rounded-[28px] bg-ink-black p-8 text-pure-white">
+          <section id="privacy" className="mt-14 rounded-[28px] bg-ink-black p-7 text-pure-white sm:mt-16 sm:p-8">
             <LockKeyhole className="h-6 w-6 text-peach-blush" />
             <h2 className="heading-sm mt-6 text-heading-sm">Privacy and access</h2>
             <p className="mt-3 max-w-xl leading-relaxed text-fog">Google authentication establishes your account identity. Repository data and queries are retrieved through user-scoped access controls; the workspace is unavailable until a valid session exists.</p>
