@@ -40,16 +40,16 @@ const ChatWindow = ({ onClose }) => {
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder="Ask about this codebase"
-        className="h-14 w-full bg-transparent pl-5 pr-16 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6"
+        className="h-14 w-full bg-transparent pl-5 pr-20 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6"
         disabled={isQuerying || isHistoryLoading}
       />
       <button
         type="submit"
         disabled={isQuerying || isHistoryLoading || !input.trim()}
-        className="absolute right-2 flex h-12 w-12 items-center justify-center rounded-full bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
+        className="absolute right-2 flex h-14 w-14 items-center justify-center rounded-full bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
         aria-label="Send question"
       >
-        <Send className="h-4 w-4" aria-hidden="true" />
+        <Send className="h-5 w-5" aria-hidden="true" />
       </button>
     </form>
   );

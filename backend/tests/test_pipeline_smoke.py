@@ -118,7 +118,8 @@ class BackendSmokeTests(unittest.TestCase):
         prompt = messages[0]["content"]
         self.assertIn("Relevant files", prompt)
         self.assertIn("How it works", prompt)
-        self.assertIn("do not use Markdown syntax", prompt)
+        self.assertIn("client renders standard Markdown", prompt)
+        self.assertIn("## Relevant files", prompt)
 
     def test_grounded_answer_includes_recent_conversation_without_replacing_evidence(self):
         from agent.agent import run_agent_loop
