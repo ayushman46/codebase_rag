@@ -19,15 +19,15 @@ const PricingPage = () => {
       </div>
       <div className="mx-auto mt-12 grid max-w-5xl border-t border-sand md:mt-16 md:grid-cols-2 md:divide-x md:divide-sand">
         {plans.map((plan) => (
-          <article key={plan.name} className="flex flex-col border-b border-sand py-10 first:md:pr-10 last:md:pl-10 md:border-b-0 md:py-12">
+          <article key={plan.name} className="flex flex-col border-b border-sand py-10 text-center first:md:pr-10 last:md:pl-10 md:border-b-0 md:py-12">
             <p className="text-sm font-semibold text-ember-orange">{plan.name}</p>
             <h2 className="mt-4 text-4xl font-semibold tracking-tight text-ink-black">{plan.price}</h2>
-            <p className="mt-4 max-w-sm text-sm leading-relaxed text-pewter">{plan.detail}</p>
-            <ul className="mt-8 space-y-4 border-t border-sand pt-7">
+            <p className="mx-auto mt-4 max-w-sm text-sm leading-relaxed text-pewter">{plan.detail}</p>
+            <ul className="mx-auto mt-8 w-full max-w-sm space-y-4 border-t border-sand pt-7 text-left">
               {plan.features.map((feature) => <li key={feature} className="flex gap-3 text-sm text-charcoal"><Check className="h-4 w-4 shrink-0 text-ember-orange" />{feature}</li>)}
             </ul>
             <div className="mt-10">
-              {plan.name === 'Explorer' && !user ? <GoogleSignInButton className="w-full sm:w-auto" /> : <Link to={user ? '/app' : '/docs'} className="inline-flex w-full justify-center rounded-full bg-ink-black px-5 py-2.5 text-sm font-semibold text-pure-white transition hover:bg-charcoal sm:w-auto">{user ? 'Open workspace' : 'Read the docs'}</Link>}
+              {plan.name === 'Explorer' && !user ? <GoogleSignInButton className="sm:w-auto" /> : <Link to={user ? '/app' : '/docs'} className="inline-flex justify-center rounded-full bg-ink-black px-5 py-2.5 text-sm font-semibold text-pure-white transition hover:bg-charcoal">{user ? 'Open workspace' : 'Read the docs'}</Link>}
             </div>
           </article>
         ))}
