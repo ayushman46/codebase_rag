@@ -34,19 +34,19 @@ const ChatWindow = ({ onClose }) => {
   };
 
   const composer = (centered = false) => (
-    <form onSubmit={handleSubmit} className={`relative mx-auto flex w-full items-center ${centered ? 'max-w-3xl' : 'max-w-5xl'}`}>
+    <form onSubmit={handleSubmit} className={`relative mx-auto flex w-full items-center rounded-full border border-charcoal bg-ink-black p-2 shadow-lg shadow-ink-black/10 ${centered ? 'max-w-3xl' : 'max-w-5xl'}`}>
       <input
         type="text"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder="Ask about this codebase"
-        className="h-16 w-full rounded-2xl border border-sand bg-pure-white pl-5 pr-18 text-base text-ink-black shadow-sm outline-none transition focus:border-stone focus:ring-2 focus:ring-peach-blush/40 placeholder:text-stone sm:pl-6"
+        className="h-14 w-full bg-transparent pl-5 pr-16 text-base text-pure-white outline-none placeholder:text-driftwood sm:pl-6"
         disabled={isQuerying || isHistoryLoading}
       />
       <button
         type="submit"
         disabled={isQuerying || isHistoryLoading || !input.trim()}
-        className="absolute right-2 flex h-12 w-12 items-center justify-center rounded-xl bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
+        className="absolute right-2 flex h-12 w-12 items-center justify-center rounded-full bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
         aria-label="Send question"
       >
         <Send className="h-4 w-4" aria-hidden="true" />
