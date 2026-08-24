@@ -3,7 +3,7 @@ import { Send, Loader2, ArrowLeft, SearchCode } from 'lucide-react';
 import useStore from '../store/useStore';
 import MessageBubble from './MessageBubble';
 
-const ChatWindow = () => {
+const ChatWindow = ({ onClose }) => {
   const { selectedRepo, setSelectedRepo, messages, askQuestion, isQuerying } = useStore();
   const [input, setInput] = useState('');
   const bottomRef = useRef(null);
@@ -20,38 +20,38 @@ const ChatWindow = () => {
   };
 
   return (
-    <div className="flex min-h-[calc(100vh-12rem)] flex-1 flex-col overflow-hidden rounded-[24px] border border-sand bg-pure-white sm:min-h-[calc(100vh-11rem)]">
-      {/* Chat header */}
-      <div className="px-6 py-4 border-b border-sand bg-pure-white flex items-center justify-between">
-        <div className="flex items-center space-x-3">
+    <div className="flex h-[calc(100dvh-7rem)] min-h-[34rem] flex-1 flex-col overflow-hidden rounded-[24px] border border-sand bg-pure-white sm:h-[calc(100dvh-8rem)]">
+      <div className="flex items-center justify-between gap-5 border-b border-sand bg-pure-white px-5 py-4 sm:px-7 sm:py-5">
+        <div className="flex min-w-0 items-center gap-3">
           <button 
-            onClick={() => setSelectedRepo(null)}
-            className="md:hidden p-1.5 hover:bg-warm-canvas rounded-lg text-slate"
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-slate transition hover:bg-warm-canvas md:hidden"
+            aria-label="Close chat"
           >
             <ArrowLeft className="w-4 h-4" />
           </button>
-          <div>
-            <h2 className="font-semibold text-ink-black text-body leading-none">
+          <div className="min-w-0">
+            <h2 className="truncate text-body font-semibold leading-none text-ink-black">
               {selectedRepo}
             </h2>
-            <p className="text-[10px] text-warm-gray mt-1 uppercase tracking-wider font-semibold">Active Session</p>
+            <p className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-warm-gray">Active session</p>
           </div>
         </div>
-        <span className="px-3 py-1 bg-peach-blush text-burnt-rust text-caption font-semibold rounded-badges tracking-caption">
-          AGENT STABLE
-        </span>
+        <div className="flex shrink-0 items-center gap-4">
+          <span className="hidden text-caption font-semibold uppercase tracking-wider text-burnt-rust sm:inline">Agent ready</span>
+          <button onClick={onClose} className="hidden text-sm font-semibold text-ember-orange transition-colors hover:text-burnt-rust md:inline">Close chat</button>
+        </div>
       </div>
       
-      {/* Messages */}
-      <div className="flex-1 space-y-6 overflow-y-auto bg-pure-white p-5 sm:p-6">
+      <div className="flex-1 space-y-6 overflow-y-auto bg-pure-white px-5 py-7 sm:px-10 sm:py-10">
         {messages.length === 0 && (
-          <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+          <div className="mx-auto flex h-full max-w-xl flex-col items-center justify-center space-y-4 text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full border border-sand bg-warm-canvas text-ember-orange">
               <SearchCode className="h-5 w-5" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="font-semibold text-ink-black">Ready to Analyze</h3>
-              <p className="text-sm text-pewter mt-1">
+              <h3 className="text-lg font-semibold text-ink-black">Ready to analyze</h3>
+              <p className="mt-2 text-sm leading-relaxed text-pewter sm:text-base">
                 Ask anything about the architecture, endpoint paths, imports, variables, or general flow of this repository.
               </p>
             </div>
@@ -70,21 +70,21 @@ const ChatWindow = () => {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input container */}
-      <div className="p-4 border-t border-sand bg-pure-white">
-        <form onSubmit={handleSubmit} className="relative flex items-center w-full max-w-4xl mx-auto">
+      <div className="border-t border-sand bg-warm-canvas/50 px-4 py-4 sm:px-7 sm:py-5">
+        <form onSubmit={handleSubmit} className="relative mx-auto flex w-full max-w-5xl items-center">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Ask about this codebase..."
-            className="w-full h-12 pl-5 pr-14 bg-warm-canvas border border-sand rounded-xl text-sm text-ink-black focus:outline-none focus:border-stone placeholder-stone"
+            className="h-16 w-full rounded-2xl border border-sand bg-pure-white pl-5 pr-18 text-base text-ink-black shadow-sm outline-none transition focus:border-stone focus:ring-2 focus:ring-peach-blush/40 placeholder:text-stone sm:pl-6"
             disabled={isQuerying}
           />
           <button
             type="submit"
             disabled={isQuerying || !input.trim()}
-            className="absolute right-1.5 w-10 h-10 bg-ember-orange hover:bg-burnt-rust text-pure-white rounded-full flex items-center justify-center transition-colors disabled:opacity-50"
+            className="absolute right-2 flex h-12 w-12 items-center justify-center rounded-xl bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
+            aria-label="Send question"
           >
             <Send className="w-4 h-4" />
           </button>

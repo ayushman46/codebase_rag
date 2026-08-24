@@ -29,7 +29,7 @@ const DashboardPage = () => {
       </aside>
       {isDrawerOpen && <button className="fixed inset-0 z-40 cursor-default bg-ink-black/10 backdrop-blur-[2px]" onClick={() => setIsDrawerOpen(false)} aria-label="Close repository list" />}
 
-      <main className="content-shell flex min-h-[calc(100vh-5rem)] flex-col justify-center py-8 sm:py-10">
+      <main className={`content-shell flex min-h-[calc(100vh-5rem)] flex-col ${selectedRepo ? 'py-4 sm:py-6' : 'justify-center py-8 sm:py-10'}`}>
         {!selectedRepo ? (
           <section className="mx-auto w-full max-w-2xl py-10 text-center sm:py-16">
             <span className="text-caption font-medium uppercase tracking-widest text-warm-gray">Private workspace · Agent 4</span>
@@ -44,7 +44,9 @@ const DashboardPage = () => {
             {repos.length > 0 && <button onClick={() => setIsDrawerOpen(true)} className="mt-6 text-sm font-semibold text-ember-orange hover:text-burnt-rust">Browse {repos.length} indexed {repos.length === 1 ? 'codebase' : 'codebases'}</button>}
           </section>
         ) : (
-          <section className="flex min-h-[calc(100vh-9rem)] flex-1 flex-col py-2"><div className="mb-4 flex justify-end"><button onClick={() => setSelectedRepo(null)} className="text-sm font-semibold text-ember-orange hover:text-burnt-rust">Close chat</button></div><ChatWindow /></section>
+          <section className="flex flex-1 flex-col">
+            <ChatWindow onClose={() => setSelectedRepo(null)} />
+          </section>
         )}
       </main>
     </div>
