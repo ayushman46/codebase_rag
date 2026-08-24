@@ -26,5 +26,6 @@ api.interceptors.request.use((config) => {
 
 export const ingestRepo = (github_url) => api.post('/ingest', { github_url });
 export const queryRepo = (repo_name, question) => api.post('/query', { repo_name, question });
+export const getConversation = (repo_name) => api.get(`/conversations/${encodeURIComponent(repo_name)}`);
 export const getRepos = () => api.get('/repos');
 export const getStatus = (repo_name) => api.get(`/status/${repo_name}`);

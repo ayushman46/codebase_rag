@@ -1,18 +1,13 @@
 import React, { useState } from 'react';
 import CodeBlock from './CodeBlock';
 import ToolCallTrace from './ToolCallTrace';
-import { motion } from 'framer-motion';
 
 const MessageBubble = ({ message }) => {
   const [showCitations, setShowCitations] = useState(false);
   const isUser = message.role === 'user';
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
-    >
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-full sm:max-w-[85%] ${isUser ? 'order-1' : 'order-2'}`}>
         <div className={`p-5 rounded-[24px] ${
           isUser 
@@ -50,13 +45,8 @@ const MessageBubble = ({ message }) => {
         
         {!isUser && message.tool_calls && <ToolCallTrace toolCalls={message.tool_calls} />}
         
-        {!isUser && message.mode && (
-          <div className="mt-2 pl-2 text-[10px] text-stone uppercase font-medium tracking-widest">
-            {message.mode} • {message.latency_ms}ms
-          </div>
-        )}
       </div>
-    </motion.div>
+    </div>
   );
 };
 

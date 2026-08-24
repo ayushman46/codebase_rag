@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from agent.agent import run_agent_loop
@@ -24,6 +24,23 @@ async def run_query(query):
 class QueryRequest(BaseModel):
     repo_name: str = Field(min_length=1, max_length=200)
     question: str = Field(min_length=1, max_length=4_000)
+
+
+async def get_owned_repo(supabase_client, repo_name: str, user_id: str):
+    res = await run_query(
+        supabase_client.table("repos").select("id, status").eq("repo_name", repo_name).eq("user_id", user_id)
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+    return res.data[0]
+
+
+async def get_conversation_history(supabase_client, repo_id: str, user_id: str, limit: int = 10):
+    res = await run_query(
+        supabase_client.table("chat_messages").select("role, content")
+        .eq("repo_id", repo_id).eq("user_id", user_id).order("created_at", desc=True).limit(limit)
+    )
+    return list(reversed(res.data or []))
 
 
 def build_context(chunks: list[dict]) -> str:
@@ -50,12 +67,7 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         assert_supabase_schema()
         require_nvidia_api_key()
         supabase_client = get_user_scoped_supabase(current_user.access_token)
-        res = await run_query(
-            supabase_client.table("repos").select("id, status").eq("repo_name", req.repo_name).eq("user_id", current_user.id)
-        )
-        if not res.data:
-            raise HTTPException(status_code=404, detail="Repository not found.")
-        repo = res.data[0]
+        repo = await get_owned_repo(supabase_client, req.repo_name, current_user.id)
         if repo["status"] != "ready":
             raise HTTPException(status_code=409, detail=f"Repository is not ready (status: {repo['status']}).")
 
@@ -68,7 +80,10 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         context = build_context(chunks)
         if not context:
             raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
-        answer, tool_calls = await run_agent_loop(supabase_client, repo["id"], question, context)
+        conversation_history = await get_conversation_history(supabase_client, repo["id"], current_user.id)
+        answer, tool_calls = await run_agent_loop(
+            supabase_client, repo["id"], question, context, conversation_history
+        )
         citations = [{
             "file_path": chunk["file_path"],
             "start_line": chunk["start_line"],
@@ -77,9 +92,23 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
             "language": chunk["language"],
             "symbols": chunk.get("symbols", []),
         } for chunk in chunks]
+        latency_ms = int((time.time() - start_time) * 1000)
+        await run_query(
+            supabase_client.table("chat_messages").insert([
+                {
+                    "repo_id": repo["id"], "user_id": current_user.id, "role": "user",
+                    "content": question,
+                },
+                {
+                    "repo_id": repo["id"], "user_id": current_user.id, "role": "assistant",
+                    "content": answer, "citations": citations, "tool_calls": tool_calls,
+                    "mode": "rag", "latency_ms": latency_ms,
+                },
+            ])
+        )
         return {
             "answer": answer, "mode": "rag", "citations": citations, "tool_calls": tool_calls,
-            "latency_ms": int((time.time() - start_time) * 1000), "tokens_used": 0,
+            "latency_ms": latency_ms, "tokens_used": 0,
         }
     except HTTPException:
         raise
@@ -93,3 +122,29 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         if "row-level security" in detail.lower():
             raise HTTPException(status_code=403, detail=detail) from error
         raise HTTPException(status_code=500, detail="Could not process the repository query.") from error
+
+
+@router.get("/conversations/{repo_name}")
+async def get_conversation(
+    repo_name: str,
+    limit: int = Query(default=100, ge=1, le=200),
+    current_user=Depends(get_current_user),
+):
+    try:
+        assert_supabase_schema()
+        supabase_client = get_user_scoped_supabase(current_user.access_token)
+        repo = await get_owned_repo(supabase_client, repo_name, current_user.id)
+        res = await run_query(
+            supabase_client.table("chat_messages")
+            .select("id, role, content, citations, tool_calls, mode, latency_ms, created_at")
+            .eq("repo_id", repo["id"]).eq("user_id", current_user.id)
+            .order("created_at", desc=True).limit(limit)
+        )
+        return {"messages": list(reversed(res.data or []))}
+    except HTTPException:
+        raise
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Could not load conversation history")
+        raise HTTPException(status_code=500, detail="Could not load conversation history.") from error

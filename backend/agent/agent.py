@@ -1,7 +1,13 @@
 from agent.nemotron import complete
 
 
-async def run_agent_loop(_supabase_client, _repo_id: str, question: str, initial_context: str):
+async def run_agent_loop(
+    _supabase_client,
+    _repo_id: str,
+    question: str,
+    initial_context: str,
+    conversation_history: list[dict] | None = None,
+):
     """Generate a grounded answer from bounded, retrieved repository evidence.
 
     Retrieval already supplies multi-file context. A single provider-neutral
@@ -29,9 +35,18 @@ Where to start
 Use only the sections that help answer the question. Keep routine answers concise; do not repeat the citation content shown separately by the application. Cite every concrete claim using the supplied file path and line range. Do not invent files, symbols, relationships, endpoints, or line numbers. If the evidence is insufficient, say exactly what could not be established from the indexed repository. Do not expose private reasoning."""
     messages = [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": f"Repository evidence:\n{initial_context}\n\nQuestion: {question}",
-        },
     ]
+    for message in (conversation_history or [])[-10:]:
+        role = message.get("role")
+        content = str(message.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            messages.append({"role": role, "content": content})
+    messages.append({
+        "role": "user",
+        "content": (
+            "Use the conversation only to resolve references in the current question. "
+            "The repository evidence below is the sole source for factual claims.\n\n"
+            f"Repository evidence:\n{initial_context}\n\nQuestion: {question}"
+        ),
+    })
     return await complete(messages), []

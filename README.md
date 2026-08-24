@@ -30,7 +30,7 @@ React frontend
     -> NVIDIA Nemotron final answer
 ```
 
-The frontend is intentionally independent of the ingestion internals. It communicates with the backend through JSON endpoints and continues to receive `answer`, `citations`, `tool_calls`, `mode`, and latency fields from `POST /api/query`.
+The frontend is intentionally independent of the ingestion internals. It communicates with the backend through JSON endpoints and continues to receive `answer`, `citations`, `tool_calls`, `mode`, and latency fields from `POST /api/query`. Conversations are retained per signed-in user and repository, so reopening a workspace restores its prior questions and answers.
 
 ## Repository processing
 
@@ -142,7 +142,7 @@ MAX_INGESTION_ATTEMPTS=3
 
 ### Supabase schema
 
-Run `supabase/00_init.sql` in the Supabase SQL editor before starting the application. It creates the pgvector extension, tables, row-level-security policies, `symbols` metadata column, durable `ingestion_jobs` queue, and both retrieval RPCs.
+Run `supabase/00_init.sql` in the Supabase SQL editor before starting the application. It creates the pgvector extension, tables, row-level-security policies, `symbols` metadata column, durable `ingestion_jobs` queue, account-scoped `chat_messages` history, and both retrieval RPCs.
 
 The migration changes the embedding format from 384 to 1024 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
 
@@ -193,6 +193,7 @@ All repository endpoints require a Supabase bearer token, which the existing fro
 | --- | --- |
 | `POST /api/ingest` | Validate a public GitHub URL, create/reset a repository record, and queue durable ingestion. |
 | `POST /api/query` | Retrieve repository evidence and return a grounded Nemotron answer with citations. |
+| `GET /api/conversations/{repo_name}` | Restore the authenticated user’s saved conversation for one repository. |
 | `GET /api/repos` | List repositories owned by the authenticated user. |
 | `GET /api/status/{repo_name}` | Return indexing state, chunk count, and safe failure message. |
 | `DELETE /api/repos/{repo_name}` | Remove an owned repository and its cascaded records. |

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getRepos, getStatus, queryRepo } from '../api/client';
+import { getConversation, getRepos, getStatus, queryRepo } from '../api/client';
 import { isSupabaseConfigured, supabase } from '../api/supabase';
 
 const useStore = create((set, get) => ({
@@ -7,6 +7,7 @@ const useStore = create((set, get) => ({
   selectedRepo: null,
   messages: [],
   isQuerying: false,
+  isHistoryLoading: false,
   isIngesting: false,
   isSigningIn: false,
   authError: null,
@@ -45,14 +46,27 @@ const useStore = create((set, get) => ({
     try {
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
-      set({ user: null, selectedRepo: null, messages: [], repos: [] });
+      set({ user: null, selectedRepo: null, messages: [], repos: [], isHistoryLoading: false });
     } catch (e) {
       console.error("Sign-out error:", e);
     }
   },
 
-  setSelectedRepo: (repoName) => {
-    set({ selectedRepo: repoName, messages: [] });
+  setSelectedRepo: async (repoName) => {
+    if (!repoName) {
+      set({ selectedRepo: null, messages: [], isHistoryLoading: false });
+      return;
+    }
+    set({ selectedRepo: repoName, messages: [], isHistoryLoading: true });
+    try {
+      const res = await getConversation(repoName);
+      if (get().selectedRepo === repoName) {
+        set({ messages: res.data.messages || [], isHistoryLoading: false });
+      }
+    } catch (e) {
+      console.error(e);
+      if (get().selectedRepo === repoName) set({ messages: [], isHistoryLoading: false });
+    }
   },
 
   fetchRepos: async () => {

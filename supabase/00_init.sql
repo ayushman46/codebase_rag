@@ -101,6 +101,23 @@ create table if not exists ingestion_jobs (
 alter table ingestion_jobs enable row level security;
 create index if not exists ingestion_jobs_status_created_idx on ingestion_jobs (status, created_at);
 
+-- Durable, account-scoped conversation history for each repository workspace.
+create table if not exists chat_messages (
+  id uuid primary key default gen_random_uuid(),
+  repo_id uuid not null references repos(id) on delete cascade,
+  user_id uuid not null,
+  role text not null check (role in ('user', 'assistant')),
+  content text not null,
+  citations jsonb not null default '[]'::jsonb,
+  tool_calls jsonb not null default '[]'::jsonb,
+  mode text,
+  latency_ms int,
+  created_at timestamptz not null default now()
+);
+
+alter table chat_messages enable row level security;
+create index if not exists chat_messages_repo_user_created_idx on chat_messages (repo_id, user_id, created_at);
+
 -- Recreate the RPCs so an existing deployment receives the symbols column too.
 drop function if exists match_chunks_dense(uuid, vector, int);
 drop function if exists match_chunks_sparse(uuid, text, int);
@@ -134,6 +151,9 @@ drop policy if exists kt_cache_insert_own on kt_cache;
 drop policy if exists kt_cache_update_own on kt_cache;
 drop policy if exists kt_cache_delete_own on kt_cache;
 drop policy if exists ingestion_jobs_service_role_only on ingestion_jobs;
+drop policy if exists chat_messages_select_own on chat_messages;
+drop policy if exists chat_messages_insert_own on chat_messages;
+drop policy if exists chat_messages_delete_own on chat_messages;
 
 create policy repos_select_own on repos
 for select
@@ -275,6 +295,29 @@ for all
 to service_role
 using (true)
 with check (true);
+
+create policy chat_messages_select_own on chat_messages
+for select
+to authenticated
+using (auth.uid() = user_id);
+
+create policy chat_messages_insert_own on chat_messages
+for insert
+to authenticated
+with check (
+  auth.uid() = user_id
+  and exists (
+    select 1
+    from repos
+    where repos.id = chat_messages.repo_id
+      and repos.user_id = auth.uid()
+  )
+);
+
+create policy chat_messages_delete_own on chat_messages
+for delete
+to authenticated
+using (auth.uid() = user_id);
 
 -- RPC for Sparse Search
 create or replace function match_chunks_sparse(p_repo_id uuid, p_query text, p_limit int)

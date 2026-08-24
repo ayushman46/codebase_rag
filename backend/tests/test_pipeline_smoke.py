@@ -19,7 +19,9 @@ class BackendSmokeTests(unittest.TestCase):
         query.select.return_value = query
         query.eq.return_value = query
         query.order.return_value = query
+        query.limit.return_value = query
         query.delete.return_value = query
+        query.insert.return_value = query
         query.execute.return_value = SimpleNamespace(data=data)
         return query
 
@@ -118,6 +120,26 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("How it works", prompt)
         self.assertIn("do not use Markdown syntax", prompt)
 
+    def test_grounded_answer_includes_recent_conversation_without_replacing_evidence(self):
+        from agent.agent import run_agent_loop
+
+        async def run_test():
+            with patch("agent.agent.complete", new=AsyncMock(return_value="Follow-up answer")) as complete:
+                await run_agent_loop(
+                    None,
+                    "repo-1",
+                    "What about that handler?",
+                    "File: src/auth.py (L1-L2)",
+                    [{"role": "user", "content": "Where is login?"}, {"role": "assistant", "content": "It is in auth.py."}],
+                )
+                return complete.await_args.args[0]
+
+        messages = asyncio.run(run_test())
+        self.assertEqual(messages[1], {"role": "user", "content": "Where is login?"})
+        self.assertEqual(messages[2], {"role": "assistant", "content": "It is in auth.py."})
+        self.assertIn("sole source for factual claims", messages[3]["content"])
+        self.assertIn("File: src/auth.py", messages[3]["content"])
+
     def test_hybrid_retrieval_deduplicates_and_keeps_readme_within_limit(self):
         from retrieval.retriever import retrieve_context
 
@@ -212,6 +234,26 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["mode"], "rag")
         self.assertEqual(response.json()["citations"][0]["end_line"], 20)
+        fake_supabase.table.assert_any_call("chat_messages")
+
+    def test_conversation_endpoint_returns_saved_messages_in_chronological_order(self):
+        from main import app
+        from api.auth import get_current_user
+
+        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
+        history_query = self._query([
+            {"id": "m-2", "role": "assistant", "content": "The answer.", "citations": [], "tool_calls": [], "mode": "rag", "latency_ms": 42, "created_at": "2026-01-01T00:00:02Z"},
+            {"id": "m-1", "role": "user", "content": "The question.", "citations": [], "tool_calls": [], "mode": None, "latency_ms": None, "created_at": "2026-01-01T00:00:01Z"},
+        ])
+        fake_supabase = MagicMock()
+        fake_supabase.table.side_effect = lambda table: repo_query if table == "repos" else history_query
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
+        with patch("api.query_router.assert_supabase_schema"), \
+             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase):
+            response = TestClient(app).get("/api/conversations/demo")
+        app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([message["role"] for message in response.json()["messages"]], ["user", "assistant"])
 
     def test_repository_endpoints_return_compatible_payloads(self):
         from main import app
