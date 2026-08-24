@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, ArrowLeft } from 'lucide-react';
+import { Send, Loader2, ArrowLeft, SearchCode } from 'lucide-react';
 import useStore from '../store/useStore';
 import MessageBubble from './MessageBubble';
 
@@ -20,7 +20,7 @@ const ChatWindow = () => {
   };
 
   return (
-    <div className="flex flex-col h-full bg-pure-white border border-sand rounded-[24px] overflow-hidden flex-1">
+    <div className="flex min-h-[calc(100vh-12rem)] flex-1 flex-col overflow-hidden rounded-[24px] border border-sand bg-pure-white sm:min-h-[calc(100vh-11rem)]">
       {/* Chat header */}
       <div className="px-6 py-4 border-b border-sand bg-pure-white flex items-center justify-between">
         <div className="flex items-center space-x-3">
@@ -43,11 +43,11 @@ const ChatWindow = () => {
       </div>
       
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-pure-white">
+      <div className="flex-1 space-y-6 overflow-y-auto bg-pure-white p-5 sm:p-6">
         {messages.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
-            <div className="w-12 h-12 rounded-full bg-warm-canvas border border-sand flex items-center justify-center text-ember-orange">
-              ✦
+            <div className="flex h-12 w-12 items-center justify-center rounded-full border border-sand bg-warm-canvas text-ember-orange">
+              <SearchCode className="h-5 w-5" aria-hidden="true" />
             </div>
             <div>
               <h3 className="font-semibold text-ink-black">Ready to Analyze</h3>

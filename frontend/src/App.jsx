@@ -59,7 +59,7 @@ function App() {
   }, [repos, pollStatus, user]);
 
   if (authLoading) {
-    return <div className="flex h-screen w-full items-center justify-center bg-warm-canvas text-ink-black"><span className="text-sm font-medium uppercase tracking-widest text-pewter animate-pulse">✦ Initializing secure workspace ✦</span></div>;
+    return <div className="flex h-screen w-full items-center justify-center bg-warm-canvas text-ink-black"><span className="text-center text-sm font-medium uppercase tracking-widest text-pewter animate-pulse">Initializing secure workspace</span></div>;
   }
 
   return (

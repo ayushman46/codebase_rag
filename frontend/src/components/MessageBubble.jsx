@@ -13,7 +13,7 @@ const MessageBubble = ({ message }) => {
       animate={{ opacity: 1, y: 0 }}
       className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
     >
-      <div className={`max-w-[85%] ${isUser ? 'order-1' : 'order-2'}`}>
+      <div className={`max-w-full sm:max-w-[85%] ${isUser ? 'order-1' : 'order-2'}`}>
         <div className={`p-5 rounded-[24px] ${
           isUser 
             ? 'bg-ember-orange text-pure-white rounded-br-none' 
