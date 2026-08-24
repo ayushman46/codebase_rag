@@ -21,12 +21,14 @@ const PlatformPage = () => {
         </div>
         <Link to={user ? '/app' : '/'} className="outline-button justify-self-start text-sm">{user ? 'Open workspace' : 'Sign in to begin'}</Link>
       </div>
-      <div className="mt-12 grid gap-5 md:grid-cols-2 lg:mt-16">
+      <div className="mt-12 border-t border-sand lg:mt-16">
         {capabilities.map(({ icon: Icon, title, text }) => (
-          <article key={title} className="flex min-h-64 flex-col rounded-[28px] border border-sand bg-pure-white p-7 transition hover:-translate-y-1 hover:shadow-[0_14px_40px_rgba(48,38,31,0.08)]">
-            <Icon className="h-6 w-6 text-ember-orange" />
-            <h2 className="mt-8 text-heading-sm font-semibold text-ink-black">{title}</h2>
-            <p className="mt-3 max-w-md leading-relaxed text-pewter">{text}</p>
+          <article key={title} className="grid gap-4 border-b border-sand py-7 sm:grid-cols-[minmax(0,.75fr)_minmax(0,1fr)] sm:items-start sm:gap-10 sm:py-9">
+            <div className="flex items-center gap-4">
+              <Icon className="h-5 w-5 shrink-0 text-ember-orange" />
+              <h2 className="text-heading-sm font-semibold text-ink-black">{title}</h2>
+            </div>
+            <p className="max-w-xl leading-relaxed text-pewter">{text}</p>
           </article>
         ))}
       </div>

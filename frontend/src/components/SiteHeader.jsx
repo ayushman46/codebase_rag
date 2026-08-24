@@ -20,7 +20,7 @@ const SiteHeader = ({ onOpenRepos }) => {
           Codebase Intel
         </Link>
 
-        <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-8 md:flex">
+        <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-10 lg:gap-14 md:flex">
           {user && onOpenRepos && (
             <button onClick={onOpenRepos} className="text-sm font-medium text-warm-gray transition-colors hover:text-ink-black">Codebases</button>
           )}
@@ -32,11 +32,11 @@ const SiteHeader = ({ onOpenRepos }) => {
         <div className="ml-auto flex shrink-0 items-center gap-3">
           <button onClick={() => setMobileMenuOpen((open) => !open)} className="p-1 text-warm-gray transition hover:text-ink-black md:hidden" aria-label="Toggle navigation" aria-expanded={mobileMenuOpen}><Menu className="h-5 w-5" /></button>
           {user ? (
-            <Link to="/account" className="flex h-9 w-9 items-center justify-center rounded-full transition-opacity hover:opacity-75" aria-label="Open account">
+            <Link to="/account" className="flex h-7 w-7 items-center justify-center rounded-full transition-opacity hover:opacity-75" aria-label="Open account">
               {user.user_metadata?.avatar_url ? (
-                <img src={user.user_metadata.avatar_url} alt="" className="h-9 w-9 rounded-full border border-sand" referrerPolicy="no-referrer" />
+                <img src={user.user_metadata.avatar_url} alt="" className="h-7 w-7 rounded-full border border-sand" referrerPolicy="no-referrer" />
               ) : (
-                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-peach-blush text-[11px] font-bold uppercase text-burnt-rust">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-peach-blush text-[9px] font-bold uppercase text-burnt-rust">
                   {displayName.slice(0, 2)}
                 </span>
               )}

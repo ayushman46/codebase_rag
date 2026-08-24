@@ -17,18 +17,17 @@ const PricingPage = () => {
         <h1 className="heading-lg page-title mt-5 text-ink-black">Start with a secure personal workspace.</h1>
         <p className="mt-5 text-lg leading-relaxed text-pewter">Simple access today, with team controls planned for growing engineering organizations.</p>
       </div>
-      <div className="mx-auto mt-12 grid max-w-4xl gap-6 md:grid-cols-2 lg:mt-16">
+      <div className="mx-auto mt-12 grid max-w-5xl border-t border-sand md:mt-16 md:grid-cols-2 md:divide-x md:divide-sand">
         {plans.map((plan) => (
-          <article key={plan.name} className={`relative flex min-h-[390px] flex-col rounded-[32px] border p-7 sm:p-8 ${plan.featured ? 'border-ember-orange bg-ink-black text-pure-white shadow-[0_20px_60px_rgba(14,14,15,0.18)]' : 'border-sand bg-pure-white text-ink-black'}`}>
-            {plan.featured && <span className="absolute right-6 top-6 rounded-full bg-ember-orange px-3 py-1 text-caption font-bold">PLANNED</span>}
-            <p className={`text-sm font-semibold ${plan.featured ? 'text-peach-blush' : 'text-ember-orange'}`}>{plan.name}</p>
-            <h2 className="mt-5 text-3xl font-semibold tracking-tight">{plan.price}</h2>
-            <p className={`mt-4 min-h-14 text-sm leading-relaxed ${plan.featured ? 'text-fog' : 'text-pewter'}`}>{plan.detail}</p>
-            <ul className="mt-8 space-y-4">
-              {plan.features.map((feature) => <li key={feature} className={`flex gap-3 text-sm ${plan.featured ? 'text-fog' : 'text-charcoal'}`}><Check className="h-4 w-4 shrink-0 text-ember-orange" />{feature}</li>)}
+          <article key={plan.name} className="flex flex-col border-b border-sand py-10 first:md:pr-10 last:md:pl-10 md:border-b-0 md:py-12">
+            <p className="text-sm font-semibold text-ember-orange">{plan.name}</p>
+            <h2 className="mt-4 text-4xl font-semibold tracking-tight text-ink-black">{plan.price}</h2>
+            <p className="mt-4 max-w-sm text-sm leading-relaxed text-pewter">{plan.detail}</p>
+            <ul className="mt-8 space-y-4 border-t border-sand pt-7">
+              {plan.features.map((feature) => <li key={feature} className="flex gap-3 text-sm text-charcoal"><Check className="h-4 w-4 shrink-0 text-ember-orange" />{feature}</li>)}
             </ul>
-            <div className="mt-auto pt-10">
-              {plan.name === 'Explorer' && !user ? <GoogleSignInButton className="w-full" /> : <Link to={user ? '/app' : '/docs'} className={`inline-flex w-full justify-center rounded-full px-5 py-2.5 text-sm font-semibold transition ${plan.featured ? 'bg-pure-white text-ink-black hover:bg-fog' : 'bg-ink-black text-pure-white hover:bg-charcoal'}`}>{user ? 'Open workspace' : 'Read the docs'}</Link>}
+            <div className="mt-10">
+              {plan.name === 'Explorer' && !user ? <GoogleSignInButton className="w-full sm:w-auto" /> : <Link to={user ? '/app' : '/docs'} className="inline-flex w-full justify-center rounded-full bg-ink-black px-5 py-2.5 text-sm font-semibold text-pure-white transition hover:bg-charcoal sm:w-auto">{user ? 'Open workspace' : 'Read the docs'}</Link>}
             </div>
           </article>
         ))}
