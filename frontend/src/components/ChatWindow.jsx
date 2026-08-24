@@ -34,13 +34,13 @@ const ChatWindow = ({ onClose }) => {
   };
 
   const composer = (centered = false) => (
-    <form onSubmit={handleSubmit} className={`relative mx-auto flex w-full items-center rounded-full border border-charcoal bg-ink-black p-2 shadow-lg shadow-ink-black/10 ${centered ? 'max-w-3xl' : 'max-w-5xl'}`}>
+    <form onSubmit={handleSubmit} className={`relative mx-auto flex w-full items-center rounded-full border border-sand bg-pure-white p-2 shadow-lg shadow-charcoal/5 ${centered ? 'max-w-3xl' : 'max-w-5xl'}`}>
       <input
         type="text"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder="Ask about this codebase"
-        className="h-14 w-full bg-transparent pl-5 pr-16 text-base text-pure-white outline-none placeholder:text-driftwood sm:pl-6"
+        className="h-14 w-full bg-transparent pl-5 pr-16 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6"
         disabled={isQuerying || isHistoryLoading}
       />
       <button
