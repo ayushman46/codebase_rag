@@ -116,6 +116,8 @@ create table if not exists chat_messages (
 );
 
 alter table chat_messages enable row level security;
+alter table chat_messages alter column citations set default '[]'::jsonb;
+alter table chat_messages alter column tool_calls set default '[]'::jsonb;
 create index if not exists chat_messages_repo_user_created_idx on chat_messages (repo_id, user_id, created_at);
 
 -- Recreate the RPCs so an existing deployment receives the symbols column too.

@@ -97,7 +97,8 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
             supabase_client.table("chat_messages").insert([
                 {
                     "repo_id": repo["id"], "user_id": current_user.id, "role": "user",
-                    "content": question,
+                    "content": question, "citations": [], "tool_calls": [],
+                    "mode": None, "latency_ms": None,
                 },
                 {
                     "repo_id": repo["id"], "user_id": current_user.id, "role": "assistant",

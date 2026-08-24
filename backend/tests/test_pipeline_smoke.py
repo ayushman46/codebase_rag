@@ -235,6 +235,10 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(response.json()["mode"], "rag")
         self.assertEqual(response.json()["citations"][0]["end_line"], 20)
         fake_supabase.table.assert_any_call("chat_messages")
+        saved_messages = repo_query.insert.call_args.args[0]
+        self.assertEqual(saved_messages[0]["role"], "user")
+        self.assertEqual(saved_messages[0]["citations"], [])
+        self.assertEqual(saved_messages[0]["tool_calls"], [])
 
     def test_conversation_endpoint_returns_saved_messages_in_chronological_order(self):
         from main import app
