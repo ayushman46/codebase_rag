@@ -5,7 +5,7 @@ import useStore from '../store/useStore';
 import GoogleSignInButton from './GoogleSignInButton';
 
 const navClass = ({ isActive }) => (
-  `text-sm font-medium transition-colors ${isActive ? 'text-ember-orange' : 'text-warm-gray hover:text-ink-black'}`
+  `rounded-full px-3 py-1.5 text-sm font-medium transition-colors ${isActive ? 'bg-pure-white text-ink-black shadow-sm ring-1 ring-sand/80' : 'text-warm-gray hover:bg-pure-white hover:text-ink-black'}`
 );
 
 const SiteHeader = ({ onOpenRepos }) => {
@@ -15,15 +15,15 @@ const SiteHeader = ({ onOpenRepos }) => {
 
   return (
     <header className="sticky top-0 z-40 border-b border-sand/80 bg-warm-canvas/95 backdrop-blur">
-      <nav className="content-shell flex min-h-20 items-center justify-between gap-3 sm:gap-5">
-        <Link to="/" className="flex shrink-0 items-center gap-2.5">
+      <nav className="content-shell grid min-h-[4.5rem] grid-cols-[1fr_auto_1fr] items-center gap-3 sm:min-h-20 sm:gap-5">
+        <Link to="/" className="flex w-fit shrink-0 items-center gap-2.5">
           <Sparkles className="h-4 w-4 text-ember-orange" aria-hidden="true" />
           <span className="text-base font-semibold tracking-tight text-ink-black">Codebase Intel</span>
         </Link>
 
-        <div className="hidden min-w-0 items-center gap-7 md:flex">
+        <div className="hidden min-w-0 items-center rounded-full border border-sand/90 bg-warm-canvas/80 p-1 md:flex">
           {user && onOpenRepos && (
-            <button onClick={onOpenRepos} className="flex items-center gap-2 text-sm font-medium text-warm-gray transition-colors hover:text-ink-black">
+            <button onClick={onOpenRepos} className="flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium text-warm-gray transition-colors hover:bg-pure-white hover:text-ink-black">
               Codebases
               <span className="rounded-badges border border-burnt-rust/10 bg-[#fff1ed] px-1.5 py-0.5 text-[10px] font-bold leading-none text-ember-orange">
                 {repos.length}
@@ -35,7 +35,7 @@ const SiteHeader = ({ onOpenRepos }) => {
           <NavLink to="/docs" className={navClass}>Docs</NavLink>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2 sm:gap-4">
+        <div className="flex shrink-0 items-center justify-self-end gap-2 sm:gap-4">
           <button onClick={() => setMobileMenuOpen((open) => !open)} className="rounded-lg p-2 text-warm-gray transition hover:bg-pure-white md:hidden" aria-label="Toggle navigation" aria-expanded={mobileMenuOpen}><Menu className="h-5 w-5" /></button>
           {user ? (
             <>
