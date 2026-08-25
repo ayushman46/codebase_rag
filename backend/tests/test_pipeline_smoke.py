@@ -41,6 +41,25 @@ class BackendSmokeTests(unittest.TestCase):
             with self.assertRaises(RepositoryValidationError):
                 normalize_github_url(value)
 
+    def test_failed_repository_can_be_requeued_with_the_same_url(self):
+        from ingest.pipeline import ensure_repo_record
+
+        supabase_client = MagicMock()
+        existing = SimpleNamespace(data=[{"id": "repo-1", "status": "failed"}])
+        with patch(
+            "ingest.pipeline.run_query",
+            new=AsyncMock(side_effect=[existing, SimpleNamespace(data=[]), SimpleNamespace(data=[]), SimpleNamespace(data=[])]),
+        ):
+            repo_id, repo_name = asyncio.run(
+                ensure_repo_record(supabase_client, "https://github.com/octocat/Hello-World", "user-1")
+            )
+
+        self.assertEqual((repo_id, repo_name), ("repo-1", "Hello-World"))
+        self.assertEqual(
+            [call.args[0] for call in supabase_client.table.call_args_list],
+            ["repos", "repos", "chunks", "kt_cache"],
+        )
+
     def test_get_files_to_process_skips_binary_lockfiles_large_files_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
