@@ -153,6 +153,32 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(vectors[0]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_count, 2)
 
+    def test_embedding_pipeline_reports_progress_for_every_batch(self):
+        from ingest.pipeline import embed_repository_chunks
+
+        chunks = [{"file_path": f"file_{index}.py", "content": "pass"} for index in range(5)]
+        query = MagicMock()
+        query.update.return_value = query
+        query.eq.return_value = query
+        query.execute.return_value = SimpleNamespace(data=[])
+        supabase_client = MagicMock()
+        supabase_client.table.return_value = query
+
+        with patch("ingest.pipeline.raise_if_ingestion_cancelled", new=AsyncMock()), \
+             patch("ingest.pipeline.run_blocking", new=AsyncMock(side_effect=lambda _func, batch: batch)), \
+             patch("ingest.pipeline.run_query", new=AsyncMock()), \
+             patch("ingest.pipeline.settings.embedding_batch_size", 2):
+            result = asyncio.run(embed_repository_chunks(supabase_client, "repo-1", chunks))
+
+        self.assertEqual(result, chunks)
+        progress_messages = [call.args[0]["error_message"] for call in query.update.call_args_list]
+        self.assertEqual(progress_messages, [
+            "Indexing 0 of 5 code sections (0%). Large repositories can take a few minutes while embeddings are created.",
+            "Indexing 2 of 5 code sections (40%). Large repositories can take a few minutes while embeddings are created.",
+            "Indexing 4 of 5 code sections (80%). Large repositories can take a few minutes while embeddings are created.",
+            "Indexing 5 of 5 code sections (100%). Large repositories can take a few minutes while embeddings are created.",
+        ])
+
     def test_cancelled_job_is_detected_before_the_next_pipeline_stage(self):
         from ingest.pipeline import IngestionCancelledError, raise_if_ingestion_cancelled
 

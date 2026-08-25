@@ -160,7 +160,7 @@ Run the current SQL file again after upgrading to the cancellation feature so th
 
 The committed `render.yaml` deploys the complete product as one Render Web Service: its build step creates `frontend/dist`, and FastAPI serves that React application while keeping all backend routes under `/api`. No separate frontend deployment is needed.
 
-1. In Render, select **New → Blueprint**, connect `ayushman46/codebase_rag`, and select the `version2.0` branch. Render reads `render.yaml` and creates one free Web Service.
+1. In Render, select **New → Blueprint**, connect `ayushman46/codebase_rag`, and select the `main` branch. Render reads `render.yaml` and creates one free Web Service.
 2. Enter the values marked as secrets in the Render form: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `NVIDIA_API_KEY`, and (after the first deploy) `CORS_ORIGINS` set to the generated `https://YOUR-SERVICE.onrender.com` URL.
 3. Run the current `supabase/00_init.sql` once in Supabase SQL Editor. In Supabase Auth, set the Site URL and Redirect URL to the generated Render URL. Add that Render URL as a Google OAuth Authorized JavaScript origin; keep the Supabase callback URI as the OAuth redirect URI.
 4. Deploy. Verify `https://YOUR-SERVICE.onrender.com/api/health`, then open the root URL to load the frontend. The Render worker automatically processes queued jobs while the service is awake.

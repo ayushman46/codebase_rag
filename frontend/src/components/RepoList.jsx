@@ -53,7 +53,7 @@ const RepoList = () => {
         const isActive = isIngestionActive(repo.status);
         const isRetrying = retryingRepoId === repo.id;
         const isStopping = stoppingRepoId === repo.id;
-        const status = getIngestionStatus(repo.status);
+        const status = getIngestionStatus(repo.status, repo.error_message);
         const stateClass = isReady ? 'text-emerald-700' : repo.status === 'failed' ? 'text-red-600' : isCancelled ? 'text-pewter' : 'text-ember-orange';
         const content = (
           <>
@@ -63,7 +63,7 @@ const RepoList = () => {
             </div>
             <p className={`mt-2 text-xs font-semibold ${stateClass}`}>{isReady ? 'Ready' : repo.status === 'failed' ? 'Needs attention' : status.label}</p>
             {isActive && <IngestionProgress repo={repo} compact />}
-            {repo.error_message && <p className={`mt-3 border-l pl-3 text-xs leading-relaxed ${isCancelled ? 'border-sand text-pewter' : 'border-red-300 text-red-600'}`}>{repo.error_message}</p>}
+            {repo.error_message && <p className={`mt-3 border-l pl-3 text-xs leading-relaxed ${isActive || isCancelled ? 'border-sand text-pewter' : 'border-red-300 text-red-600'}`}>{repo.error_message}</p>}
             {isReady && (
               <button
                 type="button"

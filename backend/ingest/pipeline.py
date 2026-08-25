@@ -85,12 +85,27 @@ async def raise_if_ingestion_cancelled(supabase_client, repo_id: str):
 
 
 async def embed_repository_chunks(supabase_client, repo_id: str, chunks: list[dict]):
-    """Embed in cancellable batches rather than one long blocking operation."""
+    """Embed in cancellable batches and persist meaningful progress for the UI."""
     embedded_chunks = []
     batch_size = max(1, settings.embedding_batch_size)
+    total_chunks = len(chunks)
+
+    async def report_progress(completed: int):
+        percent = int((completed / total_chunks) * 100) if total_chunks else 100
+        message = (
+            f"Indexing {completed} of {total_chunks} code sections ({percent}%). "
+            "Large repositories can take a few minutes while embeddings are created."
+        )
+        await run_query(
+            supabase_client.table("repos").update({"error_message": message}).eq("id", repo_id)
+        )
+
+    await report_progress(0)
     for offset in range(0, len(chunks), batch_size):
         await raise_if_ingestion_cancelled(supabase_client, repo_id)
-        embedded_chunks.extend(await run_blocking(embed_chunks, chunks[offset:offset + batch_size]))
+        batch = chunks[offset:offset + batch_size]
+        embedded_chunks.extend(await run_blocking(embed_chunks, batch))
+        await report_progress(len(embedded_chunks))
     return embedded_chunks
 
 
