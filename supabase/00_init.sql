@@ -24,7 +24,7 @@ create table if not exists chunks (
   language text,
   symbols text[] not null default '{}',
   content text not null,
-  embedding vector(2048),
+  embedding halfvec(2048),
   content_tsv tsvector generated always as (to_tsvector('english', content)) stored,
   created_at timestamptz default now()
 );
@@ -32,28 +32,32 @@ create table if not exists chunks (
 -- Safe for existing projects created before symbol metadata was introduced.
 alter table chunks add column if not exists symbols text[] not null default '{}';
 
--- Drop before a possible vector-dimension change; it is recreated below.
+-- Drop before a possible embedding-type or dimension change; it is recreated below.
 drop index if exists chunks_embedding_idx;
 
 -- The application uses NVIDIA's hosted 2048-dimensional embedding API instead of the
--- heavyweight local PyTorch model. Existing vectors from prior models cannot be
--- compared with the new vectors, so intentionally clear them and require a
--- one-time re-index after this migration.
+-- heavyweight local PyTorch model. pgvector's standard vector indexes are limited
+-- to 2,000 dimensions, so use halfvec for this 2,048-dimensional model. Existing
+-- vectors from prior models cannot be compared with the new vectors, so intentionally
+-- clear them and require a one-time re-index after this migration.
 do $$
 declare
   existing_dimension integer;
+  existing_type text;
 begin
-  select a.atttypmod - 4
-    into existing_dimension
+  select a.atttypmod - 4, t.typname
+    into existing_dimension, existing_type
   from pg_attribute a
   join pg_class c on c.oid = a.attrelid
   join pg_namespace n on n.oid = c.relnamespace
+  join pg_type t on t.oid = a.atttypid
   where n.nspname = 'public'
     and c.relname = 'chunks'
     and a.attname = 'embedding'
     and not a.attisdropped;
 
-  if existing_dimension is not null and existing_dimension <> 2048 then
+  if existing_dimension is not null
+     and (existing_dimension <> 2048 or existing_type <> 'halfvec') then
     delete from chunks;
     if to_regclass('public.kt_cache') is not null then
       delete from kt_cache;
@@ -62,14 +66,14 @@ begin
       set status = 'failed',
           chunk_count = 0,
           error_message = 'Embeddings were upgraded to 2048 dimensions. Re-ingest this repository.';
-    execute 'alter table chunks alter column embedding type vector(2048) using null::vector(2048)';
+    execute 'alter table chunks alter column embedding type halfvec(2048) using null::halfvec(2048)';
   end if;
 end;
 $$;
 
 alter table chunks enable row level security;
 
-create index if not exists chunks_embedding_idx on chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+create index if not exists chunks_embedding_idx on chunks using ivfflat (embedding halfvec_cosine_ops) with (lists = 100);
 create index if not exists chunks_content_tsv_idx on chunks using gin (content_tsv);
 
 create table if not exists kt_cache (
@@ -122,10 +126,11 @@ create index if not exists chat_messages_repo_user_created_idx on chat_messages 
 
 -- Recreate the RPCs so an existing deployment receives the symbols column too.
 drop function if exists match_chunks_dense(uuid, vector, int);
+drop function if exists match_chunks_dense(uuid, halfvec, int);
 drop function if exists match_chunks_sparse(uuid, text, int);
 
 -- RPC for Dense Search
-create or replace function match_chunks_dense(p_repo_id uuid, p_query_embedding vector(2048), p_limit int)
+create or replace function match_chunks_dense(p_repo_id uuid, p_query_embedding halfvec(2048), p_limit int)
 returns table(id uuid, file_path text, start_line int, end_line int, language text, symbols text[], content text, score float)
 language plpgsql
 as $$

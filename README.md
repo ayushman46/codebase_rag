@@ -144,7 +144,7 @@ MAX_INGESTION_ATTEMPTS=3
 
 Run `supabase/00_init.sql` in the Supabase SQL editor before starting the application. It creates the pgvector extension, tables, row-level-security policies, `symbols` metadata column, durable `ingestion_jobs` queue, account-scoped `chat_messages` history, and both retrieval RPCs.
 
-The migration changes the embedding format to 2048 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
+The migration changes the embedding format to 2048 dimensions and stores it as pgvector `halfvec(2048)`. This is required because the standard `vector` IVFFlat index is limited to 2000 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
 
 If a repository reports an embedding-dimension mismatch, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
 
