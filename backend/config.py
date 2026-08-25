@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
     nvidia_calls_per_minute: int = 20
+    # Keep hosted embedding requests deliberately small. Code chunks can be
+    # substantially larger than ordinary chat inputs, and large batches are
+    # more likely to be rejected by a shared hosted endpoint.
+    embedding_batch_size: int = 8
     embedding_retry_attempts: int = 3
     embedding_retry_base_seconds: float = 1.0
     supabase_url: str = ""

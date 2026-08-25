@@ -19,12 +19,13 @@ class EmbeddingUnavailableError(RuntimeError):
 
 def wait_for_embedding_slot():
     """Throttle hosted embedding requests across ingestion and query threads."""
+    calls_per_minute = max(1, settings.nvidia_calls_per_minute)
     while True:
         with _rate_limit_lock:
             now = time.monotonic()
             while _request_times and now - _request_times[0] >= 60:
                 _request_times.popleft()
-            if len(_request_times) < settings.nvidia_calls_per_minute:
+            if len(_request_times) < calls_per_minute:
                 _request_times.append(now)
                 return
             wait_seconds = max(0.1, 60 - (now - _request_times[0]))
@@ -99,7 +100,10 @@ def embed_chunks(chunks: List[Dict]) -> List[Dict]:
     if not chunks:
         return chunks
 
-    batch_size = 32
+    # NVIDIA's hosted endpoint is most reliable when code-heavy requests stay
+    # small. This is configurable for paid/dedicated deployments, but eight is
+    # a conservative default for the shared endpoint.
+    batch_size = max(1, settings.embedding_batch_size)
 
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]

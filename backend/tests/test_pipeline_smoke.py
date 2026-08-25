@@ -106,6 +106,30 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
 
+    def test_embed_chunks_uses_configured_small_batches(self):
+        chunks = [
+            {"file_path": f"src/file_{index}.py", "content": "def example(): pass", "start_line": 1, "end_line": 1, "language": "py"}
+            for index in range(9)
+        ]
+        fake_client = MagicMock()
+
+        def embeddings_for_batch(*, input, **_kwargs):
+            return SimpleNamespace(
+                data=[SimpleNamespace(index=index, embedding=[float(index)] * EMBEDDING_DIMENSION) for index in range(len(input))]
+            )
+
+        fake_client.embeddings.create.side_effect = embeddings_for_batch
+        with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
+             patch("ingest.embedder.settings.embedding_batch_size", 4):
+            embedded = embed_chunks(chunks)
+
+        self.assertEqual(len(embedded), 9)
+        self.assertEqual(fake_client.embeddings.create.call_count, 3)
+        self.assertEqual(
+            [len(call.kwargs["input"]) for call in fake_client.embeddings.create.call_args_list],
+            [4, 4, 1],
+        )
+
     def test_embedding_request_retries_transient_nvidia_failure(self):
         from httpx import Request, Response
         from openai import APIStatusError

@@ -87,9 +87,10 @@ async def raise_if_ingestion_cancelled(supabase_client, repo_id: str):
 async def embed_repository_chunks(supabase_client, repo_id: str, chunks: list[dict]):
     """Embed in cancellable batches rather than one long blocking operation."""
     embedded_chunks = []
-    for offset in range(0, len(chunks), 32):
+    batch_size = max(1, settings.embedding_batch_size)
+    for offset in range(0, len(chunks), batch_size):
         await raise_if_ingestion_cancelled(supabase_client, repo_id)
-        embedded_chunks.extend(await run_blocking(embed_chunks, chunks[offset:offset + 32]))
+        embedded_chunks.extend(await run_blocking(embed_chunks, chunks[offset:offset + batch_size]))
     return embedded_chunks
 
 
