@@ -1,4 +1,4 @@
-import { Loader2, RefreshCw } from 'lucide-react';
+import { ArrowUpRight, Loader2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { ingestRepo } from '../api/client';
 import useStore from '../store/useStore';
@@ -46,6 +46,15 @@ const RepoList = () => {
             <p className={`mt-2 text-xs font-semibold ${stateClass}`}>{isReady ? 'Ready' : repo.status === 'failed' ? 'Needs attention' : status.label}</p>
             {isIngestionActive(repo.status) && <IngestionProgress repo={repo} compact />}
             {repo.error_message && <p className="mt-3 border-l border-red-300 pl-3 text-xs leading-relaxed text-red-600">{repo.error_message}</p>}
+            {isReady && (
+              <button
+                type="button"
+                onClick={() => setSelectedRepo(repo.repo_name)}
+                className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-ink-black transition-colors hover:text-ember-orange"
+              >
+                Open chat <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
             {repo.status === 'failed' && (
               <button
                 type="button"
@@ -62,21 +71,9 @@ const RepoList = () => {
         );
         
         return (
-          isReady ? (
-            <button
-              key={repo.id}
-              type="button"
-              onClick={() => setSelectedRepo(repo.repo_name)}
-              className={`w-full px-1 py-5 text-left transition-colors hover:bg-warm-canvas/60 ${isSelected ? 'bg-warm-canvas/60' : ''}`}
-              aria-current={isSelected ? 'page' : undefined}
-            >
-              {content}
-            </button>
-          ) : (
-            <div key={repo.id} className="px-1 py-5" aria-disabled="true">
-              {content}
-            </div>
-          )
+          <div key={repo.id} className={`px-1 py-5 ${isSelected ? 'bg-warm-canvas/60' : ''}`} aria-current={isSelected ? 'page' : undefined}>
+            {content}
+          </div>
         );
       })}
     </div>
