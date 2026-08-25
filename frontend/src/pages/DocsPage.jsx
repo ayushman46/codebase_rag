@@ -1,31 +1,94 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import useStore from '../store/useStore';
 
-const sections = [
-  ['introduction', 'Introduction'],
-  ['workspace', 'Workspace'],
-  ['indexing', 'Indexing'],
-  ['answers', 'Answers'],
-  ['access', 'Access and privacy'],
+const guide = [
+  {
+    id: 'introduction',
+    label: 'Introduction',
+    eyebrow: 'Documentation',
+    title: 'Understand the code before you change it.',
+    summary: 'A source-grounded workspace for exploring unfamiliar repositories.',
+    paragraphs: [
+      'Codebase Intel turns a public GitHub repository into a private workspace for codebase exploration. It is designed to make the first hour in an unfamiliar system more deliberate and less dependent on guesswork.',
+      'Rather than treating a repository as a single wall of text, the platform keeps source paths, symbols, and line ranges connected to each answer. This makes it possible to move from an explanation directly to the code that supports it.',
+    ],
+  },
+  {
+    id: 'workspace',
+    label: 'Workspace',
+    eyebrow: 'Workspace',
+    title: 'A focused place for each repository.',
+    summary: 'Your repositories and conversations stay associated with your account.',
+    paragraphs: [
+      'Google sign-in establishes an account-scoped workspace. Repository records, saved conversations, and access are associated with the signed-in user rather than shared across the application.',
+      'Once a repository is ready, opening its workspace restores the conversation history for that codebase. This lets you return to an investigation without rebuilding the context of earlier questions.',
+    ],
+    action: true,
+  },
+  {
+    id: 'indexing',
+    label: 'Indexing',
+    eyebrow: 'Indexing',
+    title: 'From a repository URL to searchable source.',
+    summary: 'The source is filtered, structured, and prepared for retrieval.',
+    paragraphs: [
+      'Indexing begins when you submit a public GitHub repository URL. The service validates the repository, creates a shallow clone, and filters files that are unsupported, generated, binary, or too large to be useful evidence.',
+    ],
+    steps: [
+      ['01', 'Validate and clone', 'The repository URL is checked and a temporary shallow copy is created.'],
+      ['02', 'Read and segment code', 'Supported files are divided into source-aware sections while preserving paths, symbols, languages, and line ranges.'],
+      ['03', 'Prepare retrieval', 'Keyword retrieval is always prepared. When NVIDIA embeddings are available, a semantic index is created alongside it.'],
+      ['04', 'Map the repository', 'A compact metadata map records the files, languages, and symbols available in the workspace.'],
+    ],
+  },
+  {
+    id: 'answers',
+    label: 'Answers',
+    eyebrow: 'Answers',
+    title: 'Answers begin with evidence, not assumptions.',
+    summary: 'Questions are answered from a bounded selection of relevant source.',
+    paragraphs: [
+      'For each question, Codebase Intel searches for the most relevant source sections using semantic similarity and keyword search. Only that bounded evidence is passed to answer generation, rather than the entire repository.',
+      'Every response includes file and line-range citations. If live answer generation or semantic retrieval is temporarily unavailable, the workspace still returns the retrieved source context so you can continue investigating directly from the code.',
+    ],
+  },
+  {
+    id: 'access',
+    label: 'Access and privacy',
+    eyebrow: 'Access and privacy',
+    title: 'The workspace remains account-scoped.',
+    summary: 'Access is tied to the signed-in workspace owner.',
+    paragraphs: [
+      'Authentication identifies the workspace owner, and repository records are protected with user-scoped access controls. Codebase Intel accepts public GitHub repositories, while access to indexed records and saved conversations remains limited to the associated account.',
+      'Citations keep the exploration process inspectable: an answer can be checked against its supporting source instead of being accepted as an unsupported summary.',
+    ],
+  },
 ];
 
-const workflow = [
-  ['01', 'Submit a repository', 'Paste a public GitHub repository URL. The service validates the URL and creates a workspace record for the signed-in account.'],
-  ['02', 'Read the source', 'The repository is shallow-cloned, unsupported or generated files are skipped, and supported files are divided into source-aware sections with paths, symbols, and line ranges.'],
-  ['03', 'Build retrieval', 'When NVIDIA embeddings are available, each source section is added to a semantic index. Keyword retrieval is also prepared, so the workspace can remain useful if semantic indexing is temporarily unavailable.'],
-  ['04', 'Ask with context', 'A question retrieves a small set of relevant source sections. The answer is generated from that evidence and paired with the file paths and line ranges used to support it.'],
-];
-
-const AnchorList = ({ className = '' }) => (
+const GuideNavigation = ({ activeId, onSelect, className = '' }) => (
   <nav className={className} aria-label="Documentation navigation">
-    {sections.map(([id, label]) => (
-      <a key={id} href={`#${id}`} className="transition-colors hover:text-ink-black">{label}</a>
-    ))}
+    {guide.map(({ id, label }) => {
+      const active = id === activeId;
+      return (
+        <button
+          key={id}
+          type="button"
+          onClick={() => onSelect(id)}
+          aria-current={active ? 'page' : undefined}
+          className={`text-left transition-colors ${active ? 'font-semibold text-ink-black' : 'text-warm-gray hover:text-ink-black'}`}
+        >
+          {label}
+        </button>
+      );
+    })}
   </nav>
 );
 
 const DocsPage = () => {
   const { user } = useStore();
+  const [activeId, setActiveId] = useState('introduction');
+  const activeSection = guide.find((section) => section.id === activeId) || guide[0];
 
   return (
     <main className="content-shell page-section">
@@ -33,78 +96,49 @@ const DocsPage = () => {
         <aside className="hidden lg:block">
           <div className="sticky top-24">
             <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">Guide</p>
-            <AnchorList className="mt-5 flex flex-col gap-3 text-sm leading-relaxed text-warm-gray" />
+            <GuideNavigation activeId={activeId} onSelect={setActiveId} className="mt-5 flex flex-col gap-3 text-sm leading-relaxed" />
           </div>
         </aside>
 
-        <article className="min-w-0">
-          <header id="introduction" className="scroll-mt-28">
-            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">Documentation</p>
-            <h1 className="heading-lg mt-5 text-[clamp(2.7rem,5vw,4.2rem)] text-ink-black">Understand the code before you change it.</h1>
-            <p className="mt-7 max-w-2xl text-lg leading-relaxed text-pewter">
-              Codebase Intel turns a public repository into a private, source-grounded workspace. It helps you trace unfamiliar systems through concise answers that remain connected to the implementation.
-            </p>
-            <AnchorList className="mt-10 flex flex-wrap gap-x-6 gap-y-3 border-y border-sand py-4 text-sm text-warm-gray lg:hidden" />
-          </header>
+        <article className="min-w-0" aria-live="polite">
+          <GuideNavigation activeId={activeId} onSelect={setActiveId} className="flex gap-x-6 gap-y-3 overflow-x-auto border-y border-sand py-4 text-sm whitespace-nowrap lg:hidden" />
 
-          <section id="workspace" className="scroll-mt-28 border-t border-sand pt-14 sm:pt-20">
-            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">Workspace</p>
-            <h2 className="heading-sm mt-4 text-heading text-ink-black">One repository, one focused place to explore.</h2>
-            <div className="mt-6 space-y-5 text-[17px] leading-relaxed text-pewter">
-              <p>
-                Google sign-in creates an account-scoped workspace. Your repository records, conversation history, and access are associated with that account rather than shared across users.
-              </p>
-              <p>
-                Once a repository is ready, its workspace keeps the conversation and its citations together. This makes it easy to return to a codebase without rebuilding context from the beginning.
-              </p>
+          <section key={activeSection.id} className="pt-12 sm:pt-16">
+            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">{activeSection.eyebrow}</p>
+            <h1 className="heading-lg mt-5 text-[clamp(2.7rem,5vw,4.2rem)] text-ink-black">{activeSection.title}</h1>
+            <p className="mt-6 text-lg leading-relaxed text-pewter">{activeSection.summary}</p>
+
+            <div className="mt-12 space-y-5 border-t border-sand pt-10 text-[17px] leading-relaxed text-pewter">
+              {activeSection.paragraphs.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
             </div>
-            <Link to={user ? '/app' : '/'} className="mt-8 inline-block text-sm font-semibold text-ember-orange transition-colors hover:text-burnt-rust">
-              {user ? 'Open your workspace' : 'Sign in to get started'}
-            </Link>
-          </section>
 
-          <section id="indexing" className="scroll-mt-28 border-t border-sand pt-14 sm:pt-20">
-            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">Indexing</p>
-            <h2 className="heading-sm mt-4 text-heading text-ink-black">From a URL to searchable source evidence.</h2>
-            <ol className="mt-10 divide-y divide-sand border-y border-sand">
-              {workflow.map(([step, title, text]) => (
-                <li key={step} className="grid gap-4 py-8 sm:grid-cols-[3.5rem_minmax(0,1fr)] sm:gap-6 sm:py-10">
-                  <p className="text-caption font-semibold tracking-[0.18em] text-ember-orange">{step}</p>
-                  <div>
-                    <h3 className="text-xl font-semibold tracking-tight text-ink-black">{title}</h3>
-                    <p className="mt-3 text-[17px] leading-relaxed text-pewter">{text}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </section>
+            {activeSection.steps && (
+              <ol className="mt-12 divide-y divide-sand border-y border-sand">
+                {activeSection.steps.map(([step, title, text]) => (
+                  <li key={step} className="grid gap-4 py-8 sm:grid-cols-[3.5rem_minmax(0,1fr)] sm:gap-6 sm:py-10">
+                    <p className="text-caption font-semibold tracking-[0.18em] text-ember-orange">{step}</p>
+                    <div>
+                      <h2 className="text-xl font-semibold tracking-tight text-ink-black">{title}</h2>
+                      <p className="mt-3 text-[17px] leading-relaxed text-pewter">{text}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
 
-          <section id="answers" className="scroll-mt-28 border-t border-sand pt-14 sm:pt-20">
-            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">Answers</p>
-            <h2 className="heading-sm mt-4 text-heading text-ink-black">Answers begin with evidence, not assumptions.</h2>
-            <div className="mt-6 space-y-5 text-[17px] leading-relaxed text-pewter">
-              <p>
-                For each question, Codebase Intel combines semantic similarity and keyword search to select relevant source sections. The language model receives only that bounded evidence, not the entire repository.
-              </p>
-              <p>
-                Each response includes citations to the files and line ranges it uses. If live answer generation is temporarily unavailable, the workspace still returns the retrieved source context so investigation can continue.
-              </p>
-            </div>
-          </section>
-
-          <section id="access" className="scroll-mt-28 border-t border-sand py-14 sm:py-20">
-            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-ember-orange">Access and privacy</p>
-            <h2 className="heading-sm mt-4 text-heading text-ink-black">Your workspace remains account-scoped.</h2>
-            <p className="mt-6 text-[17px] leading-relaxed text-pewter">
-              Authentication establishes the workspace owner, and repository records are protected with user-scoped access controls. Codebase Intel accepts public GitHub repositories; access to indexed records and saved conversations is limited to the signed-in workspace owner.
-            </p>
+            {activeSection.action && (
+              <Link to={user ? '/app' : '/'} className="mt-10 inline-block text-sm font-semibold text-ember-orange transition-colors hover:text-burnt-rust">
+                {user ? 'Open your workspace' : 'Sign in to get started'}
+              </Link>
+            )}
           </section>
         </article>
 
         <aside className="hidden lg:block">
           <div className="sticky top-24 border-l border-sand pl-5">
-            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-stone">On this page</p>
-            <AnchorList className="mt-5 flex flex-col gap-3 text-sm leading-relaxed text-warm-gray" />
+            <p className="text-caption font-semibold uppercase tracking-[0.18em] text-stone">Current section</p>
+            <p className="mt-5 text-sm font-semibold text-ink-black">{activeSection.label}</p>
+            <p className="mt-3 text-sm leading-relaxed text-warm-gray">{activeSection.summary}</p>
           </div>
         </aside>
       </div>
