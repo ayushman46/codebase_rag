@@ -6,7 +6,7 @@ from database import assert_supabase_schema, explain_supabase_api_error, supabas
 from ingest.chunker import chunk_file
 from ingest.cloner import cleanup_repo, clone_repo_shallow, normalize_github_url, repository_name
 from ingest.cloner import get_files_to_process
-from ingest.embedder import embed_chunks
+from ingest.embedder import EmbeddingUnavailableError, embed_chunks
 from ingest.summarizer import build_kt_cache
 from config import settings
 
@@ -224,7 +224,19 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
 
         await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({"status": "embedding"}).eq("id", repo_id))
-        embedded_chunks = await embed_repository_chunks(supabase_client, repo_id, all_chunks)
+        semantic_index_warning = None
+        try:
+            embedded_chunks = await embed_repository_chunks(supabase_client, repo_id, all_chunks)
+        except EmbeddingUnavailableError as error:
+            # The source chunks themselves remain valuable. Preserve them so
+            # keyword retrieval and cited answers stay available while the
+            # hosted embedding endpoint is recovering.
+            logger.warning("NVIDIA embeddings unavailable for %s; using keyword retrieval: %s", repo_id, error)
+            semantic_index_warning = (
+                "NVIDIA semantic embeddings are temporarily unavailable. "
+                "This repository is ready with keyword retrieval; re-index later to restore semantic search."
+            )
+            embedded_chunks = [{**chunk, "embedding": None} for chunk in all_chunks]
 
         for offset in range(0, len(embedded_chunks), 100):
             await raise_if_ingestion_cancelled(supabase_client, repo_id)
@@ -245,7 +257,7 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
         await build_kt_cache(supabase_client, repo_id, embedded_chunks)
         await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({
-            "status": "ready", "chunk_count": len(embedded_chunks), "error_message": None,
+            "status": "ready", "chunk_count": len(embedded_chunks), "error_message": semantic_index_warning,
         }).eq("id", repo_id))
         return True
     except IngestionCancelledError:

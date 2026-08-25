@@ -1,11 +1,20 @@
 import asyncio
+import logging
 from typing import Dict, List
 
-from ingest.embedder import embed_query
+from ingest.embedder import EmbeddingUnavailableError, embed_query
+
+logger = logging.getLogger(__name__)
 
 async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
-    # 1. Embed query
-    query_emb = await asyncio.to_thread(embed_query, query)
+    # 1. Embed the query when NVIDIA is available. A repository may have been
+    # indexed during a temporary embedding outage, in which case sparse search
+    # still provides source-grounded evidence instead of failing the chat.
+    try:
+        query_emb = await asyncio.to_thread(embed_query, query)
+    except EmbeddingUnavailableError:
+        logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
+        query_emb = None
     
     # 2. Run queries concurrently via asyncio wrapping Supabase sync calls
     # supabase-py is sync, so we run them in executors to not block the event loop
@@ -31,13 +40,20 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
             .ilike('file_path', '%readme.md%')\
             .limit(1).execute()
 
-    dense_res, sparse_res, readme_res = await asyncio.gather(
-        loop.run_in_executor(None, fetch_dense),
+    retrieval_tasks = [
         loop.run_in_executor(None, fetch_sparse),
-        loop.run_in_executor(None, fetch_readme)
-    )
+        loop.run_in_executor(None, fetch_readme),
+    ]
+    if query_emb is not None:
+        retrieval_tasks.insert(0, loop.run_in_executor(None, fetch_dense))
+    results = await asyncio.gather(*retrieval_tasks)
+    if query_emb is not None:
+        dense_res, sparse_res, readme_res = results
+    else:
+        sparse_res, readme_res = results
+        dense_res = None
     
-    dense_chunks = dense_res.data or []
+    dense_chunks = dense_res.data if dense_res is not None else []
     sparse_chunks = sparse_res.data or []
     readme_chunks = readme_res.data or []
 

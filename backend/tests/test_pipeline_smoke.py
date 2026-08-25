@@ -295,6 +295,34 @@ class BackendSmokeTests(unittest.TestCase):
         results = asyncio.run(run_test())
         self.assertEqual([chunk["id"] for chunk in results], ["readme", "a"])
 
+    def test_keyword_retrieval_remains_available_when_query_embeddings_are_unavailable(self):
+        from ingest.embedder import EmbeddingUnavailableError
+        from retrieval.retriever import retrieve_context
+
+        sparse = [{"id": "sparse", "file_path": "src/login.py", "start_line": 1, "end_line": 2, "language": "py", "content": "login handler"}]
+
+        class FakeRequest:
+            def __init__(self, data): self.data = data
+            def execute(self): return SimpleNamespace(data=self.data)
+            def select(self, *_args): return self
+            def eq(self, *_args): return self
+            def ilike(self, *_args): return self
+            def limit(self, *_args): return self
+
+        class FakeSupabase:
+            def rpc(self, name, _args):
+                if name != "match_chunks_sparse":
+                    raise AssertionError(f"Unexpected retrieval RPC: {name}")
+                return FakeRequest(sparse)
+            def table(self, _name): return FakeRequest([])
+
+        async def run_test():
+            with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("503")):
+                return await retrieve_context(FakeSupabase(), "repo-1", "where is login", top_k=2)
+
+        results = asyncio.run(run_test())
+        self.assertEqual([chunk["id"] for chunk in results], ["sparse"])
+
     def test_query_returns_clear_error_when_nvidia_is_not_configured(self):
         from config import ModelConfigurationError
         from main import app
@@ -465,6 +493,22 @@ class BackendSmokeTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["message"], "Indexing stopped")
+
+    def test_reindex_endpoint_uses_the_existing_user_scoped_repository(self):
+        from main import app
+        from api.auth import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
+        with patch("api.repos_router.assert_supabase_schema"), \
+             patch("api.repos_router.get_ingestion_supabase_client", return_value=MagicMock()), \
+             patch("api.repos_router.run_query", new=AsyncMock(return_value=SimpleNamespace(data=[{"github_url": "https://github.com/octocat/demo.git"}]))), \
+             patch("api.repos_router.ensure_repo_record", new=AsyncMock(return_value=("repo-1", "demo"))), \
+             patch("api.repos_router.enqueue_ingestion_job", new=AsyncMock()) as enqueue:
+            response = TestClient(app).post("/api/repos/demo/reindex")
+        app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["repo_name"], "demo")
+        enqueue.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,9 @@ from database import (
     assert_supabase_schema,
     get_ingestion_supabase_client,
     get_user_scoped_supabase,
+    explain_supabase_api_error,
 )
+from ingest.pipeline import IngestionConflictError, enqueue_ingestion_job, ensure_repo_record
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -76,6 +78,34 @@ async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
         logger.exception("Could not delete repository")
         raise HTTPException(status_code=502, detail="Could not delete repository.") from error
     return {"message": f"Repository {repo_name} deleted successfully"}
+
+
+@router.post("/repos/{repo_name}/reindex")
+async def reindex_repository(repo_name: str, current_user=Depends(get_current_user)):
+    """Requeue an existing repository without relying on frontend URL state."""
+    try:
+        assert_supabase_schema()
+        supabase_client = get_ingestion_supabase_client()
+        existing = await run_query(
+            supabase_client.table("repos").select("github_url")
+            .eq("repo_name", repo_name).eq("user_id", current_user.id).limit(1)
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Repository not found.")
+        repo_id, normalized_name = await ensure_repo_record(
+            supabase_client, existing.data[0]["github_url"], current_user.id
+        )
+        await enqueue_ingestion_job(supabase_client, existing.data[0]["github_url"], current_user.id, repo_id)
+    except HTTPException:
+        raise
+    except IngestionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Could not re-index repository")
+        raise HTTPException(status_code=502, detail=explain_supabase_api_error(error)) from error
+    return {"message": "Repository queued for re-indexing", "repo_name": normalized_name}
 
 
 @router.post("/repos/{repo_name}/cancel-indexing")
