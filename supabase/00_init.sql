@@ -94,7 +94,7 @@ create table if not exists ingestion_jobs (
   repo_id uuid not null references repos(id) on delete cascade unique,
   user_id uuid not null,
   github_url text not null,
-  status text not null default 'queued' check (status in ('queued', 'processing', 'completed', 'failed')),
+  status text not null default 'queued' check (status in ('queued', 'processing', 'completed', 'failed', 'cancelled')),
   attempts int not null default 0,
   claimed_at timestamptz,
   finished_at timestamptz,
@@ -103,6 +103,9 @@ create table if not exists ingestion_jobs (
 );
 
 alter table ingestion_jobs enable row level security;
+alter table ingestion_jobs drop constraint if exists ingestion_jobs_status_check;
+alter table ingestion_jobs add constraint ingestion_jobs_status_check
+  check (status in ('queued', 'processing', 'completed', 'failed', 'cancelled'));
 create index if not exists ingestion_jobs_status_created_idx on ingestion_jobs (status, created_at);
 
 -- Durable, account-scoped conversation history for each repository workspace.

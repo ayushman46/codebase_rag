@@ -148,6 +148,8 @@ The migration changes the embedding format to 2048 dimensions and stores it as p
 
 If a repository reports an embedding-dimension mismatch, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
 
+Run the current SQL file again after upgrading to the cancellation feature so the ingestion queue accepts the `cancelled` status. The workspace can then stop queued or active indexing and remove partial chunks safely.
+
 ### Render deployment (free, one service)
 
 The committed `render.yaml` deploys the complete product as one Render Web Service: its build step creates `frontend/dist`, and FastAPI serves that React application while keeping all backend routes under `/api`. No separate frontend deployment is needed.

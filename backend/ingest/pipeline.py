@@ -17,6 +17,10 @@ class IngestionConflictError(RuntimeError):
     pass
 
 
+class IngestionCancelledError(RuntimeError):
+    pass
+
+
 async def run_blocking(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
@@ -70,6 +74,23 @@ async def enqueue_ingestion_job(supabase_client, github_url: str, user_id: str, 
             on_conflict="repo_id",
         )
     )
+
+
+async def raise_if_ingestion_cancelled(supabase_client, repo_id: str):
+    job = await run_query(
+        supabase_client.table("ingestion_jobs").select("status").eq("repo_id", repo_id).limit(1)
+    )
+    if job.data and job.data[0].get("status") == "cancelled":
+        raise IngestionCancelledError("Indexing was stopped by the user.")
+
+
+async def embed_repository_chunks(supabase_client, repo_id: str, chunks: list[dict]):
+    """Embed in cancellable batches rather than one long blocking operation."""
+    embedded_chunks = []
+    for offset in range(0, len(chunks), 32):
+        await raise_if_ingestion_cancelled(supabase_client, repo_id)
+        embedded_chunks.extend(await run_blocking(embed_chunks, chunks[offset:offset + 32]))
+    return embedded_chunks
 
 
 async def requeue_stale_jobs(supabase_client):
@@ -134,15 +155,19 @@ async def process_one_queued_ingestion(supabase_client):
         job["user_id"],
         job["repo_id"],
     )
-    await run_query(
-        supabase_client.table("ingestion_jobs").update(
-            {
-                "status": "completed" if succeeded else "failed",
-                "finished_at": datetime.now(UTC).isoformat(),
-                "claimed_at": None,
-            }
-        ).eq("id", job["id"])
+    current_job = await run_query(
+        supabase_client.table("ingestion_jobs").select("status").eq("id", job["id"]).limit(1)
     )
+    if not current_job.data or current_job.data[0].get("status") != "cancelled":
+        await run_query(
+            supabase_client.table("ingestion_jobs").update(
+                {
+                    "status": "completed" if succeeded else "failed",
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "claimed_at": None,
+                }
+            ).eq("id", job["id"])
+        )
     return {"processed": True, "repo_id": job["repo_id"], "succeeded": succeeded}
 
 
@@ -157,11 +182,13 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
         canonical_url = normalize_github_url(github_url)
         if repo_id is None:
             repo_id, _ = await ensure_repo_record(supabase_client, canonical_url, user_id)
+        await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({
             "status": "cloning", "error_message": None, "chunk_count": 0,
         }).eq("id", repo_id))
         repo_path = await run_blocking(clone_repo_shallow, canonical_url)
 
+        await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({"status": "chunking"}).eq("id", repo_id))
         files = await run_blocking(get_files_to_process, repo_path)
         if not files:
@@ -179,10 +206,12 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
         if not all_chunks:
             raise ValueError("No readable source code chunks were created from this repository.")
 
+        await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({"status": "embedding"}).eq("id", repo_id))
-        embedded_chunks = await run_blocking(embed_chunks, all_chunks)
+        embedded_chunks = await embed_repository_chunks(supabase_client, repo_id, all_chunks)
 
         for offset in range(0, len(embedded_chunks), 100):
+            await raise_if_ingestion_cancelled(supabase_client, repo_id)
             db_chunks = [{
                 "repo_id": repo_id,
                 "file_path": chunk["file_path"],
@@ -195,12 +224,23 @@ async def run_ingestion_for_repo(supabase_client, github_url: str, user_id: str,
             } for chunk in embedded_chunks[offset:offset + 100]]
             await run_query(supabase_client.table("chunks").insert(db_chunks))
 
+        await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({"status": "summarizing"}).eq("id", repo_id))
         await build_kt_cache(supabase_client, repo_id, embedded_chunks)
+        await raise_if_ingestion_cancelled(supabase_client, repo_id)
         await run_query(supabase_client.table("repos").update({
             "status": "ready", "chunk_count": len(embedded_chunks), "error_message": None,
         }).eq("id", repo_id))
         return True
+    except IngestionCancelledError:
+        logger.info("Repository ingestion cancelled for %s", repo_id)
+        if repo_id:
+            await run_query(supabase_client.table("chunks").delete().eq("repo_id", repo_id))
+            await run_query(supabase_client.table("kt_cache").delete().eq("repo_id", repo_id))
+            await run_query(supabase_client.table("repos").update({
+                "status": "cancelled", "chunk_count": 0, "error_message": "Indexing stopped by you.",
+            }).eq("id", repo_id))
+        return False
     except Exception as error:
         error_message = explain_supabase_api_error(error)
         # Expected configuration mismatches are already turned into a clear,

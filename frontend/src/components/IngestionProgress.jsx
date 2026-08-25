@@ -25,6 +25,9 @@ export const getIngestionStatus = (status) => {
   if (status === 'failed') {
     return { label: 'Needs attention', detail: 'Indexing stopped before the repository was ready.', index: -1 };
   }
+  if (status === 'cancelled') {
+    return { label: 'Stopped', detail: 'Indexing was stopped before the repository was ready.', index: -1 };
+  }
   const index = stageIndex(status);
   return index >= 0
     ? { ...stages[index], index }

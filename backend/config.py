@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
     nvidia_calls_per_minute: int = 20
+    embedding_retry_attempts: int = 3
+    embedding_retry_base_seconds: float = 1.0
     supabase_url: str = ""
     supabase_key: str = ""
     supabase_service_role_key: str = ""

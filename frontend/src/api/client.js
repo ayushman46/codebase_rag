@@ -29,3 +29,4 @@ export const queryRepo = (repo_name, question) => api.post('/query', { repo_name
 export const getConversation = (repo_name) => api.get(`/conversations/${encodeURIComponent(repo_name)}`);
 export const getRepos = () => api.get('/repos');
 export const getStatus = (repo_name) => api.get(`/status/${repo_name}`);
+export const cancelIndexing = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/cancel-indexing`);

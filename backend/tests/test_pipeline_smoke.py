@@ -106,6 +106,39 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
 
+    def test_embedding_request_retries_transient_nvidia_failure(self):
+        from httpx import Request, Response
+        from openai import APIStatusError
+        from ingest.embedder import embed_texts
+
+        transient_error = APIStatusError(
+            "Service unavailable",
+            response=Response(503, request=Request("POST", "https://integrate.api.nvidia.com/v1/embeddings")),
+            body=None,
+        )
+        fake_client = MagicMock()
+        fake_client.embeddings.create.side_effect = [
+            transient_error,
+            SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]),
+        ]
+        with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
+             patch("ingest.embedder.wait_for_embedding_slot"), \
+             patch("ingest.embedder.time.sleep"):
+            vectors = embed_texts(["retry this embedding"], input_type="passage")
+
+        self.assertEqual(len(vectors[0]), EMBEDDING_DIMENSION)
+        self.assertEqual(fake_client.embeddings.create.call_count, 2)
+
+    def test_cancelled_job_is_detected_before_the_next_pipeline_stage(self):
+        from ingest.pipeline import IngestionCancelledError, raise_if_ingestion_cancelled
+
+        with patch(
+            "ingest.pipeline.run_query",
+            new=AsyncMock(return_value=SimpleNamespace(data=[{"status": "cancelled"}])),
+        ):
+            with self.assertRaises(IngestionCancelledError):
+                asyncio.run(raise_if_ingestion_cancelled(MagicMock(), "repo-1"))
+
     def test_nemotron_request_uses_required_model_and_hides_reasoning(self):
         from agent.nemotron import complete
         fake_response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Grounded answer", reasoning_content="private"))])
@@ -338,6 +371,28 @@ class BackendSmokeTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.assertEqual(response.status_code, 503)
         self.assertIn("SUPABASE_SERVICE_ROLE_KEY", response.json()["detail"])
+
+    def test_cancel_endpoint_marks_an_active_repository_stopped(self):
+        from main import app
+        from api.auth import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
+        with patch("api.repos_router.assert_supabase_schema"), \
+             patch("api.repos_router.get_ingestion_supabase_client", return_value=MagicMock()), \
+             patch(
+                 "api.repos_router.run_query",
+                 new=AsyncMock(side_effect=[
+                     SimpleNamespace(data=[{"id": "repo-1", "status": "embedding"}]),
+                     SimpleNamespace(data=[]),
+                     SimpleNamespace(data=[]),
+                     SimpleNamespace(data=[]),
+                     SimpleNamespace(data=[]),
+                 ]),
+             ):
+            response = TestClient(app).post("/api/repos/demo/cancel-indexing")
+        app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"], "Indexing stopped")
 
 
 if __name__ == "__main__":

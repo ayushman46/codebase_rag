@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getConversation, getRepos, getStatus, queryRepo } from '../api/client';
+import { cancelIndexing, getConversation, getRepos, getStatus, queryRepo } from '../api/client';
 import { isSupabaseConfigured, supabase } from '../api/supabase';
 
 const useStore = create((set, get) => ({
@@ -96,6 +96,15 @@ const useStore = create((set, get) => ({
     set((state) => ({
       repos: state.repos.map((item) => item.id === repo.id
         ? { ...item, status: 'queued', chunk_count: 0, error_message: null }
+        : item),
+    }));
+  },
+
+  cancelRepoIndexing: async (repo) => {
+    await cancelIndexing(repo.repo_name);
+    set((state) => ({
+      repos: state.repos.map((item) => item.id === repo.id
+        ? { ...item, status: 'cancelled', chunk_count: 0, error_message: 'Indexing stopped by you.' }
         : item),
     }));
   },

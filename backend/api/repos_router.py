@@ -4,7 +4,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.auth import get_current_user
-from database import DatabaseConfigurationError, assert_supabase_schema, get_user_scoped_supabase
+from database import (
+    DatabaseConfigurationError,
+    assert_supabase_schema,
+    get_ingestion_supabase_client,
+    get_user_scoped_supabase,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,3 +76,41 @@ async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
         logger.exception("Could not delete repository")
         raise HTTPException(status_code=502, detail="Could not delete repository.") from error
     return {"message": f"Repository {repo_name} deleted successfully"}
+
+
+@router.post("/repos/{repo_name}/cancel-indexing")
+async def cancel_indexing(repo_name: str, current_user=Depends(get_current_user)):
+    try:
+        assert_supabase_schema()
+        supabase_client = get_ingestion_supabase_client()
+        existing = await run_query(
+            supabase_client.table("repos").select("id, status")
+            .eq("repo_name", repo_name).eq("user_id", current_user.id).limit(1)
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Repository not found.")
+        repo = existing.data[0]
+        if repo["status"] not in {"queued", "cloning", "chunking", "embedding", "summarizing"}:
+            raise HTTPException(status_code=409, detail="This repository is not currently being indexed.")
+
+        await run_query(
+            supabase_client.table("ingestion_jobs").update({
+                "status": "cancelled", "finished_at": None, "claimed_at": None,
+                "last_error": "Indexing stopped by the user.",
+            }).eq("repo_id", repo["id"])
+        )
+        await run_query(supabase_client.table("chunks").delete().eq("repo_id", repo["id"]))
+        await run_query(supabase_client.table("kt_cache").delete().eq("repo_id", repo["id"]))
+        await run_query(
+            supabase_client.table("repos").update({
+                "status": "cancelled", "chunk_count": 0, "error_message": "Indexing stopped by you.",
+            }).eq("id", repo["id"])
+        )
+    except HTTPException:
+        raise
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Could not cancel repository ingestion")
+        raise HTTPException(status_code=502, detail="Could not stop repository indexing. Please try again.") from error
+    return {"message": "Indexing stopped", "repo_name": repo_name}
