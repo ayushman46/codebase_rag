@@ -1,11 +1,10 @@
 import { ArrowUpRight, Loader2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
-import { ingestRepo } from '../api/client';
 import useStore from '../store/useStore';
 import IngestionProgress, { getIngestionStatus, isIngestionActive } from './IngestionProgress';
 
 const RepoList = () => {
-  const { repos, selectedRepo, setSelectedRepo, fetchRepos } = useStore();
+  const { repos, selectedRepo, setSelectedRepo, reindexRepo } = useStore();
   const [retryingRepoId, setRetryingRepoId] = useState(null);
   const [retryError, setRetryError] = useState(null);
 
@@ -13,8 +12,7 @@ const RepoList = () => {
     setRetryingRepoId(repo.id);
     setRetryError(null);
     try {
-      await ingestRepo(repo.github_url);
-      await fetchRepos();
+      await reindexRepo(repo);
     } catch (error) {
       setRetryError({
         repoId: repo.id,

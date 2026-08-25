@@ -45,6 +45,16 @@ def get_supabase_client():
     return build_supabase_client()
 
 
+def get_ingestion_supabase_client():
+    """Return the server client required to write and process durable ingestion jobs."""
+    if not settings.supabase_service_role_key:
+        raise DatabaseConfigurationError(
+            "Repository indexing requires SUPABASE_SERVICE_ROLE_KEY in the backend environment. "
+            "Add the service_role key in Render, then redeploy the backend."
+        )
+    return build_supabase_client()
+
+
 def build_supabase_client(access_token: Optional[str] = None):
     url = settings.supabase_url
     key = settings.supabase_service_role_key or settings.supabase_key

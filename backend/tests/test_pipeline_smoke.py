@@ -314,7 +314,7 @@ class BackendSmokeTests(unittest.TestCase):
 
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
         with patch("api.ingest_router.assert_supabase_schema"), \
-             patch("api.ingest_router.get_user_scoped_supabase", return_value=MagicMock()), \
+             patch("api.ingest_router.get_ingestion_supabase_client", return_value=MagicMock()), \
              patch("api.ingest_router.ensure_repo_record", new=AsyncMock(return_value=("repo-1", "demo"))), \
              patch("api.ingest_router.enqueue_ingestion_job", new=AsyncMock()) as enqueue:
             response = TestClient(app).post("/api/ingest", json={"github_url": "https://github.com/octocat/demo"})
@@ -322,6 +322,22 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["repo_name"], "demo")
         enqueue.assert_awaited_once()
+
+    def test_ingest_endpoint_explains_missing_service_role_key(self):
+        from database import DatabaseConfigurationError
+        from main import app
+        from api.auth import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
+        with patch("api.ingest_router.assert_supabase_schema"), \
+             patch(
+                 "api.ingest_router.get_ingestion_supabase_client",
+                 side_effect=DatabaseConfigurationError("Repository indexing requires SUPABASE_SERVICE_ROLE_KEY."),
+             ):
+            response = TestClient(app).post("/api/ingest", json={"github_url": "https://github.com/octocat/demo"})
+        app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("SUPABASE_SERVICE_ROLE_KEY", response.json()["detail"])
 
 
 if __name__ == "__main__":

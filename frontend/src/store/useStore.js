@@ -91,6 +91,15 @@ const useStore = create((set, get) => ({
 
   setIngesting: (val) => set({ isIngesting: val }),
 
+  reindexRepo: async (repo) => {
+    await ingestRepo(repo.github_url);
+    set((state) => ({
+      repos: state.repos.map((item) => item.id === repo.id
+        ? { ...item, status: 'queued', chunk_count: 0, error_message: null }
+        : item),
+    }));
+  },
+
   askQuestion: async (question) => {
     const repo = get().selectedRepo;
     if (!repo) return;

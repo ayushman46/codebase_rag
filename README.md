@@ -114,7 +114,7 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 VITE_API_BASE_URL=http://localhost:8000/api
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` is recommended for backend writes. The frontend uses only the `VITE_` public Supabase settings. `.env` is ignored by Git and must never be committed.
+`SUPABASE_SERVICE_ROLE_KEY` is required for backend indexing and retrying because ingestion jobs are server-only. The frontend uses only the `VITE_` public Supabase settings. `.env` is ignored by Git and must never be committed.
 
 ### Google sign-in
 

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
-from database import DatabaseConfigurationError, assert_supabase_schema, get_user_scoped_supabase
+from database import DatabaseConfigurationError, assert_supabase_schema, get_ingestion_supabase_client
 from ingest.cloner import RepositoryValidationError, normalize_github_url
 from ingest.pipeline import IngestionConflictError, enqueue_ingestion_job, ensure_repo_record
 
@@ -21,7 +21,9 @@ async def ingest_repo(req: IngestRequest, current_user=Depends(get_current_user)
     try:
         assert_supabase_schema()
         github_url = normalize_github_url(req.github_url)
-        supabase_client = get_user_scoped_supabase(current_user.access_token)
+        # Queue rows are intentionally server-only; authentication above still
+        # establishes the user identity used to scope the repository record.
+        supabase_client = get_ingestion_supabase_client()
         repo_id, repo_name = await ensure_repo_record(supabase_client, github_url, current_user.id)
         await enqueue_ingestion_job(supabase_client, github_url, current_user.id, repo_id)
     except RepositoryValidationError as error:
