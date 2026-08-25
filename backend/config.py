@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     nemotron_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
-    embedding_model: str = "nvidia/nv-embedqa-e5-v5"
+    embedding_model: str = "nvidia/nemotron-3-embed-1b"
+    embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
     nvidia_calls_per_minute: int = 20
     supabase_url: str = ""

@@ -42,7 +42,7 @@ The ingestion pipeline is implemented in `backend/ingest`.
 4. Repository-wide file, byte, and chunk limits protect the service from oversized input.
 5. Files are split at common declaration boundaries when possible and otherwise use overlapping line windows. Chunk line ranges are calculated from the actual source file.
 6. Lightweight regular expressions record declared functions, classes, interfaces, structs, enums, and common JavaScript arrow functions. They supplement retrieval metadata; they are not presented as a full parser.
-7. NVIDIA `nvidia/nv-embedqa-e5-v5` produces hosted 1024-dimensional passage embeddings without a local embedding model.
+7. NVIDIA `nvidia/nemotron-3-embed-1b` produces hosted 2048-dimensional passage embeddings without a local embedding model.
 8. Chunks and metadata are written to Supabase in bounded batches. A deterministic repository metadata cache records languages, files, directories, and detected symbols without adding an ingestion-time model dependency.
 
 If a clone, embedding, or indexing step fails, the repository is marked `failed` and receives a safe diagnostic message. The exact temporary clone directory is cleaned up in all cases.
@@ -75,7 +75,7 @@ The current frontend uses ordinary JSON responses rather than a streaming protoc
 - Frontend: React, Vite, Zustand, Supabase JavaScript client
 - API: Python, FastAPI, Uvicorn
 - Authentication and storage: Supabase Auth, PostgreSQL, pgvector, PostgREST
-- Embeddings: NVIDIA `nvidia/nv-embedqa-e5-v5` through the OpenAI-compatible API
+- Embeddings: NVIDIA `nvidia/nemotron-3-embed-1b` through the OpenAI-compatible API
 - Answer generation: NVIDIA Nemotron through the OpenAI-compatible Python client
 - Git ingestion: GitPython
 
@@ -105,7 +105,7 @@ Copy `.env.example` to `.env` and set the values required by the deployment:
 NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NEMOTRON_MODEL=nvidia/nemotron-3-ultra-550b-a55b
-EMBEDDING_MODEL=nvidia/nv-embedqa-e5-v5
+EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 VITE_SUPABASE_URL=
@@ -144,9 +144,9 @@ MAX_INGESTION_ATTEMPTS=3
 
 Run `supabase/00_init.sql` in the Supabase SQL editor before starting the application. It creates the pgvector extension, tables, row-level-security policies, `symbols` metadata column, durable `ingestion_jobs` queue, account-scoped `chat_messages` history, and both retrieval RPCs.
 
-The migration changes the embedding format from 384 to 1024 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
+The migration changes the embedding format to 2048 dimensions. When this SQL is applied to an existing project, it intentionally clears old chunks and marks repositories for re-ingestion; vectors from different models cannot be compared safely. The backend reports a missing migration as a `503` configuration error instead of attempting ingestion against an incompatible schema.
 
-If a repository reports `expected 384 dimensions, not 1024`, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
+If a repository reports an embedding-dimension mismatch, the database still needs this one-time migration. Run the current complete `supabase/00_init.sql` file (not an older copied version), restart the backend, and submit the repository again.
 
 ### Render deployment (free, one service)
 
@@ -233,7 +233,7 @@ The following verification was executed during the current implementation work:
 - Python compilation and the backend test suite passed.
 - The FastAPI application started successfully and served `GET /` with HTTP 200.
 - A public GitHub repository was cloned, filtered, chunked, and cleaned up successfully.
-- NVIDIA's embedding API produced a 1024-dimensional vector.
+- NVIDIA's embedding API produced a 2048-dimensional vector.
 - A live NVIDIA Nemotron request succeeded using the configured environment key.
 
 ## Security and operational notes

@@ -4,7 +4,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from config import require_nvidia_api_key, settings
 
-EMBEDDING_DIMENSION = 1024
+EMBEDDING_DIMENSION = settings.embedding_dimension
 _client = None
 
 

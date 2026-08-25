@@ -104,10 +104,10 @@ def explain_supabase_api_error(error: Exception) -> str:
     if isinstance(error, APIError):
         message = str(error)
         normalized_message = message.lower()
-        if "dimensions" in normalized_message and "1024" in normalized_message and "expected" in normalized_message:
+        if "dimensions" in normalized_message and "expected" in normalized_message:
             return (
-                "Your Supabase database still uses 384-dimensional embeddings, but this application uses NVIDIA "
-                "1024-dimensional embeddings. Run the current supabase/00_init.sql in the Supabase SQL Editor once, "
+                "Your Supabase database embedding dimension is incompatible with this application's NVIDIA "
+                "2048-dimensional embeddings. Run the current supabase/00_init.sql in the Supabase SQL Editor once, "
                 "then submit this repository again. Existing code chunks will be rebuilt during re-indexing."
             )
         if "row-level security" in normalized_message:

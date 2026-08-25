@@ -24,7 +24,7 @@ create table if not exists chunks (
   language text,
   symbols text[] not null default '{}',
   content text not null,
-  embedding vector(1024),
+  embedding vector(2048),
   content_tsv tsvector generated always as (to_tsvector('english', content)) stored,
   created_at timestamptz default now()
 );
@@ -35,8 +35,8 @@ alter table chunks add column if not exists symbols text[] not null default '{}'
 -- Drop before a possible vector-dimension change; it is recreated below.
 drop index if exists chunks_embedding_idx;
 
--- The application uses NVIDIA's hosted 1024-dimensional embedding API instead of the
--- heavyweight local PyTorch model. Existing 384-dimensional rows cannot be
+-- The application uses NVIDIA's hosted 2048-dimensional embedding API instead of the
+-- heavyweight local PyTorch model. Existing vectors from prior models cannot be
 -- compared with the new vectors, so intentionally clear them and require a
 -- one-time re-index after this migration.
 do $$
@@ -53,7 +53,7 @@ begin
     and a.attname = 'embedding'
     and not a.attisdropped;
 
-  if existing_dimension is not null and existing_dimension <> 1024 then
+  if existing_dimension is not null and existing_dimension <> 2048 then
     delete from chunks;
     if to_regclass('public.kt_cache') is not null then
       delete from kt_cache;
@@ -61,8 +61,8 @@ begin
     update repos
       set status = 'failed',
           chunk_count = 0,
-          error_message = 'Embeddings were upgraded. Re-ingest this repository.';
-    execute 'alter table chunks alter column embedding type vector(1024) using null::vector(1024)';
+          error_message = 'Embeddings were upgraded to 2048 dimensions. Re-ingest this repository.';
+    execute 'alter table chunks alter column embedding type vector(2048) using null::vector(2048)';
   end if;
 end;
 $$;
@@ -125,7 +125,7 @@ drop function if exists match_chunks_dense(uuid, vector, int);
 drop function if exists match_chunks_sparse(uuid, text, int);
 
 -- RPC for Dense Search
-create or replace function match_chunks_dense(p_repo_id uuid, p_query_embedding vector(1024), p_limit int)
+create or replace function match_chunks_dense(p_repo_id uuid, p_query_embedding vector(2048), p_limit int)
 returns table(id uuid, file_path text, start_line int, end_line int, language text, symbols text[], content text, score float)
 language plpgsql
 as $$

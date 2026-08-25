@@ -208,10 +208,10 @@ class BackendSmokeTests(unittest.TestCase):
         from postgrest.exceptions import APIError
 
         message = explain_supabase_api_error(
-            APIError({"message": "expected 384 dimensions, not 1024", "code": "22000"})
+            APIError({"message": "expected 1024 dimensions, not 2048", "code": "22000"})
         )
         self.assertIn("supabase/00_init.sql", message)
-        self.assertIn("1024-dimensional", message)
+        self.assertIn("2048-dimensional", message)
 
     def test_query_returns_grounded_answer_and_citations(self):
         from main import app
