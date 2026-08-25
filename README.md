@@ -107,9 +107,10 @@ NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NEMOTRON_MODEL=nvidia/nemotron-3-ultra-550b-a55b
 EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 EMBEDDING_DIMENSION=2048
-EMBEDDING_BATCH_SIZE=8
+EMBEDDING_BATCH_SIZE=4
 NVIDIA_CALLS_PER_MINUTE=20
-EMBEDDING_RETRY_ATTEMPTS=3
+EMBEDDING_RETRY_ATTEMPTS=5
+EMBEDDING_RETRY_BASE_SECONDS=2
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 VITE_SUPABASE_URL=
@@ -144,7 +145,7 @@ INGESTION_JOB_TIMEOUT_SECONDS=900
 MAX_INGESTION_ATTEMPTS=3
 ```
 
-Repository indexing sends eight code chunks per NVIDIA embedding request by default and retries transient `429`/`5xx` responses. This is intentionally slower than large batches, but it prevents common `503` failures on NVIDIA's shared hosted endpoint. Keep `EMBEDDING_BATCH_SIZE=8` and `NVIDIA_CALLS_PER_MINUTE=20` on Render unless you have a dedicated endpoint with known higher limits.
+Repository indexing sends four code chunks per NVIDIA embedding request by default and retries transient `429`/`5xx` responses with provider-aware exponential backoff. This is intentionally slower than large batches, but it prevents common `503` failures on NVIDIA's shared hosted endpoint. Keep `EMBEDDING_BATCH_SIZE=4`, `NVIDIA_CALLS_PER_MINUTE=20`, and the retry defaults on Render unless you have a dedicated endpoint with known higher limits.
 
 ### Supabase schema
 

@@ -153,6 +153,28 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(vectors[0]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_count, 2)
 
+    def test_embedding_retry_honors_nvidia_retry_after_header(self):
+        from httpx import Request, Response
+        from openai import APIStatusError
+        from ingest.embedder import embed_texts
+
+        transient_error = APIStatusError(
+            "Service unavailable",
+            response=Response(503, headers={"retry-after": "7"}, request=Request("POST", "https://integrate.api.nvidia.com/v1/embeddings")),
+            body=None,
+        )
+        fake_client = MagicMock()
+        fake_client.embeddings.create.side_effect = [
+            transient_error,
+            SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]),
+        ]
+        with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
+             patch("ingest.embedder.wait_for_embedding_slot"), \
+             patch("ingest.embedder.time.sleep") as sleep:
+            embed_texts(["retry this embedding"], input_type="passage")
+
+        sleep.assert_called_once_with(7.0)
+
     def test_embedding_pipeline_reports_progress_for_every_batch(self):
         from ingest.pipeline import embed_repository_chunks
 

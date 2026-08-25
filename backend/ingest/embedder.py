@@ -38,6 +38,18 @@ def should_retry_embedding_error(error: Exception) -> bool:
     return isinstance(error, APIStatusError) and error.status_code in {429, 500, 502, 503, 504}
 
 
+def embedding_retry_delay(error: Exception, attempt: int) -> float:
+    """Prefer the provider's cooldown hint, otherwise use bounded backoff."""
+    response = getattr(error, "response", None)
+    retry_after = response.headers.get("retry-after") if response is not None else None
+    try:
+        if retry_after is not None:
+            return min(60.0, max(0.1, float(retry_after)))
+    except (TypeError, ValueError):
+        pass
+    return min(30.0, settings.embedding_retry_base_seconds * (2 ** attempt))
+
+
 def get_embedding_client():
     """Return the hosted NVIDIA embedding client."""
     global _client
@@ -56,7 +68,8 @@ def embed_texts(texts: List[str], *, input_type: str) -> List[List[float]]:
     if not texts:
         return []
     last_error: Exception | None = None
-    for attempt in range(settings.embedding_retry_attempts):
+    attempts = max(1, settings.embedding_retry_attempts)
+    for attempt in range(attempts):
         try:
             wait_for_embedding_slot()
             response = get_embedding_client().embeddings.create(
@@ -69,9 +82,9 @@ def embed_texts(texts: List[str], *, input_type: str) -> List[List[float]]:
             break
         except Exception as error:
             last_error = error
-            if not should_retry_embedding_error(error) or attempt == settings.embedding_retry_attempts - 1:
+            if not should_retry_embedding_error(error) or attempt == attempts - 1:
                 break
-            time.sleep(settings.embedding_retry_base_seconds * (2 ** attempt))
+            time.sleep(embedding_retry_delay(error, attempt))
     else:  # pragma: no cover - the loop always breaks or returns a response.
         last_error = RuntimeError("Embedding retry loop ended unexpectedly.")
 
@@ -101,7 +114,7 @@ def embed_chunks(chunks: List[Dict]) -> List[Dict]:
         return chunks
 
     # NVIDIA's hosted endpoint is most reliable when code-heavy requests stay
-    # small. This is configurable for paid/dedicated deployments, but eight is
+    # small. This is configurable for paid/dedicated deployments, but four is
     # a conservative default for the shared endpoint.
     batch_size = max(1, settings.embedding_batch_size)
 

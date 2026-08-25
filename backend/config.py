@@ -18,9 +18,11 @@ class Settings(BaseSettings):
     # Keep hosted embedding requests deliberately small. Code chunks can be
     # substantially larger than ordinary chat inputs, and large batches are
     # more likely to be rejected by a shared hosted endpoint.
-    embedding_batch_size: int = 8
-    embedding_retry_attempts: int = 3
-    embedding_retry_base_seconds: float = 1.0
+    embedding_batch_size: int = 4
+    # Shared hosted capacity can return a short-lived 503. Five attempts with
+    # backoff provide a 30-second recovery window before a job is failed.
+    embedding_retry_attempts: int = 5
+    embedding_retry_base_seconds: float = 2.0
     supabase_url: str = ""
     supabase_key: str = ""
     supabase_service_role_key: str = ""
