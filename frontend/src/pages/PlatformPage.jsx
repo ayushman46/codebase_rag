@@ -1,5 +1,8 @@
 const PlatformPage = () => (
-  <main className="content-shell flex min-h-[calc(100svh-5rem)] items-center justify-center py-12 sm:py-16">
+  <main
+    className="content-shell flex items-center justify-center py-12 sm:py-16"
+    style={{ minHeight: 'calc(100vh - 3.5rem)' }}
+  >
     <section className="mx-auto max-w-3xl text-center">
       <span className="text-caption font-semibold uppercase tracking-widest text-ember-orange">The platform</span>
       <h1 className="heading-lg page-title mt-5 text-ink-black">A focused workspace for understanding unfamiliar systems.</h1>
