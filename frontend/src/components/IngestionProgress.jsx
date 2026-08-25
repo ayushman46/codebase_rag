@@ -40,14 +40,22 @@ const IngestionProgress = ({ repo, compact = false }) => {
   const progress = isReady ? 100 : isFailed ? 0 : Math.round(((info.index + 1) / stages.length) * 100);
 
   if (compact) {
+    if (isReady) {
+      return <p className="mt-2 text-xs font-medium text-emerald-700">Ready to explore</p>;
+    }
+
+    if (isFailed) {
+      return <p className="mt-2 text-xs font-medium text-red-600">Indexing stopped</p>;
+    }
+
     return (
       <div className="mt-3" aria-label={`Ingestion status: ${info.label}`}>
-        <div className="mb-1.5 flex items-center justify-between gap-3 text-caption">
-          <span className="font-semibold text-pewter">{isReady ? 'Ready' : isFailed ? 'Indexing stopped' : `Step ${info.index + 1} of ${stages.length} · ${info.label}`}</span>
-          {!isFailed && <span className="text-warm-gray">{isReady ? 'Complete' : 'Live status'}</span>}
+        <div className="mb-2 flex items-center justify-between gap-3 text-caption">
+          <span className="font-medium text-pewter">{`Step ${info.index + 1} of ${stages.length} · ${info.label}`}</span>
+          <span className="text-warm-gray">{progress}%</span>
         </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-fog" aria-hidden="true">
-          <div className={`h-full rounded-full transition-[width] duration-500 ${isFailed ? 'bg-red-500' : isReady ? 'bg-emerald-500' : 'bg-ember-orange'}`} style={{ width: `${isFailed ? 100 : progress}%` }} />
+        <div className="h-px overflow-hidden bg-sand" aria-hidden="true">
+          <div className="h-full bg-ember-orange transition-[width] duration-500" style={{ width: `${progress}%` }} />
         </div>
       </div>
     );

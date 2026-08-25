@@ -20,12 +20,12 @@ const DashboardPage = () => {
     <div className="min-h-screen bg-warm-canvas text-ink-black">
       <SiteHeader onOpenRepos={() => setIsDrawerOpen(true)} />
 
-      <aside className={`fixed inset-y-0 left-0 z-50 flex w-full max-w-[340px] flex-col border-r border-sand bg-pure-white shadow-xl transition-transform duration-300 sm:w-[340px] ${isDrawerOpen ? 'translate-x-0' : '-translate-x-full'}`} aria-label="Indexed repositories">
-        <div className="flex items-center justify-between border-b border-sand p-6">
-          <div><h2 className="text-heading-sm font-semibold tracking-tight text-ink-black">Codebases</h2><p className="mt-0.5 text-caption text-warm-gray">Your index console</p></div>
-          <button onClick={() => setIsDrawerOpen(false)} className="rounded-lg p-1.5 text-slate transition hover:bg-warm-canvas" aria-label="Close repository list"><X className="h-5 w-5" /></button>
+      <aside className={`fixed inset-y-0 left-0 z-50 flex w-full max-w-[360px] flex-col border-r border-sand bg-pure-white shadow-xl transition-transform duration-300 sm:w-[360px] ${isDrawerOpen ? 'translate-x-0' : '-translate-x-full'}`} aria-label="Indexed repositories">
+        <div className="flex items-center justify-between border-b border-sand px-5 py-5 sm:px-6 sm:py-6">
+          <div><h2 className="text-2xl font-semibold tracking-tight text-ink-black">Codebases</h2><p className="mt-1 text-sm text-warm-gray">Your repositories</p></div>
+          <button onClick={() => setIsDrawerOpen(false)} className="p-2 text-slate transition-colors hover:text-ink-black" aria-label="Close repository list"><X className="h-5 w-5" /></button>
         </div>
-        <div className="flex-1 overflow-y-auto p-6"><p className="mb-4 text-caption font-semibold uppercase tracking-wider text-stone">Indexed repositories</p><RepoList /></div>
+        <div className="flex-1 overflow-y-auto px-5 py-6 sm:px-6"><p className="mb-3 text-caption font-semibold uppercase tracking-wider text-stone">Indexed repositories</p><RepoList /></div>
       </aside>
       {isDrawerOpen && <button className="fixed inset-0 z-40 cursor-default bg-ink-black/10 backdrop-blur-[2px]" onClick={() => setIsDrawerOpen(false)} aria-label="Close repository list" />}
 
