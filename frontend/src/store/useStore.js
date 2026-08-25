@@ -137,8 +137,12 @@ const useStore = create((set, get) => ({
         isQuerying: false
       }));
     } catch (e) {
+      const detail = e.response?.data?.detail;
+      const message = typeof detail === 'string' && detail.trim()
+        ? detail
+        : 'This question could not be completed right now. Your repository and conversation are unchanged; please try again shortly.';
       set((state) => ({
-        messages: [...state.messages, { role: 'assistant', content: 'Sorry, an error occurred.' }],
+        messages: [...state.messages, { role: 'assistant', content: message, mode: 'error' }],
         isQuerying: false
       }));
     }

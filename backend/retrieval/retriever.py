@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Dict, List
 
+from config import ModelConfigurationError
 from ingest.embedder import EmbeddingUnavailableError, embed_query
 
 logger = logging.getLogger(__name__)
@@ -12,7 +13,7 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
     # still provides source-grounded evidence instead of failing the chat.
     try:
         query_emb = await asyncio.to_thread(embed_query, query)
-    except EmbeddingUnavailableError:
+    except (EmbeddingUnavailableError, ModelConfigurationError):
         logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
         query_emb = None
     

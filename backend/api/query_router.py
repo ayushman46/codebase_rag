@@ -60,12 +60,32 @@ def build_context(chunks: list[dict]) -> str:
     return "\n\n".join(sections)
 
 
+def build_retrieval_fallback(chunks: list[dict]) -> str:
+    """Return a useful, cited response when live answer generation is unavailable."""
+    lines = [
+        "## Retrieved code context",
+        "Live answer generation is temporarily unavailable. The relevant repository evidence is available below.",
+        "",
+        "## Relevant files",
+    ]
+    for chunk in chunks[:5]:
+        summary = " ".join(str(chunk.get("content") or "").split())[:220]
+        lines.append(
+            f"- **{chunk['file_path']} (L{chunk['start_line']}-L{chunk['end_line']}):** {summary or 'Indexed source evidence.'}"
+        )
+    lines.extend([
+        "",
+        "## Next step",
+        "Try the question again in a moment. The citations below remain available for direct inspection.",
+    ])
+    return "\n".join(lines)
+
+
 @router.post("/query")
 async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
     start_time = time.time()
     try:
         assert_supabase_schema()
-        require_nvidia_api_key()
         supabase_client = get_user_scoped_supabase(current_user.access_token)
         repo = await get_owned_repo(supabase_client, req.repo_name, current_user.id)
         if repo["status"] != "ready":
@@ -81,9 +101,14 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         if not context:
             raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
         conversation_history = await get_conversation_history(supabase_client, repo["id"], current_user.id)
-        answer, tool_calls = await run_agent_loop(
-            supabase_client, repo["id"], question, context, conversation_history
-        )
+        try:
+            answer, tool_calls = await run_agent_loop(
+                supabase_client, repo["id"], question, context, conversation_history
+            )
+            mode = "rag"
+        except (LLMProviderError, ModelConfigurationError):
+            logger.warning("Live answer generation unavailable for repository %s; returning retrieved evidence", repo["id"])
+            answer, tool_calls, mode = build_retrieval_fallback(chunks), [], "retrieval_fallback"
         citations = [{
             "file_path": chunk["file_path"],
             "start_line": chunk["start_line"],
@@ -103,20 +128,18 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
                 {
                     "repo_id": repo["id"], "user_id": current_user.id, "role": "assistant",
                     "content": answer, "citations": citations, "tool_calls": tool_calls,
-                    "mode": "rag", "latency_ms": latency_ms,
+                    "mode": mode, "latency_ms": latency_ms,
                 },
             ])
         )
         return {
-            "answer": answer, "mode": "rag", "citations": citations, "tool_calls": tool_calls,
+            "answer": answer, "mode": mode, "citations": citations, "tool_calls": tool_calls,
             "latency_ms": latency_ms, "tokens_used": 0,
         }
     except HTTPException:
         raise
     except (ModelConfigurationError, DatabaseConfigurationError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-    except LLMProviderError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
     except Exception as error:
         logger.exception("Repository query failed")
         detail = explain_supabase_api_error(error)

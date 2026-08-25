@@ -228,6 +228,33 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(request["model"], "nvidia/nemotron-3-ultra-550b-a55b")
         self.assertEqual(request["extra_body"], {"chat_template_kwargs": {"enable_thinking": True}})
 
+    def test_nemotron_retries_a_transient_generation_failure(self):
+        from httpx import Request, Response
+        from openai import APIStatusError
+        from agent.nemotron import complete
+
+        transient_error = APIStatusError(
+            "Service unavailable",
+            response=Response(503, request=Request("POST", "https://integrate.api.nvidia.com/v1/chat/completions")),
+            body=None,
+        )
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(side_effect=[
+            transient_error,
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Recovered answer"))]),
+        ])
+        fake_client.close = AsyncMock()
+
+        async def run_test():
+            with patch("agent.nemotron.require_nvidia_api_key", return_value="test-key"), \
+                 patch("agent.nemotron.AsyncOpenAI", return_value=fake_client), \
+                 patch("agent.nemotron.nvidia_rate_limiter.acquire", new=AsyncMock()), \
+                 patch("agent.nemotron.asyncio.sleep", new=AsyncMock()):
+                return await complete([{"role": "user", "content": "Question"}])
+
+        self.assertEqual(asyncio.run(run_test()), "Recovered answer")
+        self.assertEqual(fake_client.chat.completions.create.await_count, 2)
+
     def test_grounded_answer_prompt_requests_plain_text_sections(self):
         from agent.agent import run_agent_loop
 
@@ -323,18 +350,27 @@ class BackendSmokeTests(unittest.TestCase):
         results = asyncio.run(run_test())
         self.assertEqual([chunk["id"] for chunk in results], ["sparse"])
 
-    def test_query_returns_clear_error_when_nvidia_is_not_configured(self):
+    def test_query_returns_retrieved_evidence_when_nvidia_is_not_configured(self):
         from config import ModelConfigurationError
         from main import app
         from api.auth import get_current_user
 
+        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
+        fake_supabase = MagicMock()
+        fake_supabase.table.return_value = repo_query
+        chunks = [{
+            "id": "chunk-1", "file_path": "src/auth.py", "start_line": 10, "end_line": 20,
+            "language": "py", "symbols": ["login"], "content": "def login(): pass",
+        }]
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
         with patch("api.query_router.assert_supabase_schema"), \
-             patch("api.query_router.require_nvidia_api_key", side_effect=ModelConfigurationError("NVIDIA is not configured.")):
+             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(side_effect=ModelConfigurationError("NVIDIA is not configured."))):
             response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "Where is login?"})
         app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"], "NVIDIA is not configured.")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mode"], "retrieval_fallback")
 
     def test_schema_check_turns_missing_symbol_column_into_actionable_error(self):
         from database import DatabaseConfigurationError, assert_supabase_schema
@@ -392,6 +428,29 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(saved_messages[0]["role"], "user")
         self.assertEqual(saved_messages[0]["citations"], [])
         self.assertEqual(saved_messages[0]["tool_calls"], [])
+
+    def test_query_returns_retrieved_evidence_when_live_generation_is_unavailable(self):
+        from main import app
+        from api.auth import get_current_user
+        from agent.nemotron import LLMProviderError
+
+        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
+        fake_supabase = MagicMock()
+        fake_supabase.table.return_value = repo_query
+        chunks = [{
+            "id": "chunk-1", "file_path": "src/auth.py", "start_line": 10, "end_line": 20,
+            "language": "py", "symbols": ["login"], "content": "def login(): pass",
+        }]
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
+        with patch("api.query_router.assert_supabase_schema"), \
+             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(side_effect=LLMProviderError("503"))):
+            response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "Where is login?"})
+        app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mode"], "retrieval_fallback")
+        self.assertIn("Retrieved code context", response.json()["answer"])
 
     def test_conversation_endpoint_returns_saved_messages_in_chronological_order(self):
         from main import app
