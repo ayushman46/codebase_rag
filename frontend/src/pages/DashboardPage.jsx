@@ -32,8 +32,7 @@ const DashboardPage = () => {
       <main className={`content-shell flex min-h-[calc(100vh-5rem)] flex-col ${selectedRepo ? 'py-4 sm:py-6' : 'justify-center py-8 sm:py-10'}`}>
         {!selectedRepo ? (
           <section className="mx-auto w-full max-w-2xl py-10 text-center sm:py-16">
-            <span className="text-caption font-medium uppercase tracking-widest text-warm-gray">Private workspace · Agent 4</span>
-            <h1 className="heading-display landing-title mt-6 text-ink-black">Understand any codebase.</h1>
+            <h1 className="heading-display landing-title text-ink-black">Understand any codebase.</h1>
             <p className="mx-auto mt-6 max-w-md text-body leading-relaxed text-pewter">Paste a public GitHub repository link to ingest and analyze it in your private workspace.</p>
             <div className="mx-auto mt-10 max-w-xl"><RepoInput /></div>
             {activeRepos.length > 0 && (
