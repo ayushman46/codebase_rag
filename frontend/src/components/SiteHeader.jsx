@@ -15,7 +15,7 @@ const SiteHeader = ({ onOpenRepos }) => {
 
   return (
     <header className="sticky top-0 z-40 border-b border-sand/80 bg-warm-canvas/95 backdrop-blur">
-      <nav className="content-shell relative flex min-h-[4.75rem] items-center justify-between sm:min-h-[5.25rem]">
+      <nav className="content-shell relative flex min-h-[4.5rem] items-center justify-between sm:min-h-20">
         <Link to="/" className="shrink-0 text-lg font-semibold tracking-tight text-ink-black">
           Codebase Intel
         </Link>
