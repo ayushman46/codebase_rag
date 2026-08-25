@@ -5,7 +5,7 @@ import useStore from '../store/useStore';
 import GoogleSignInButton from './GoogleSignInButton';
 
 const navClass = ({ isActive }) => (
-  `text-sm font-medium transition-colors ${isActive ? 'text-ink-black' : 'text-warm-gray hover:text-ink-black'}`
+  `text-[15px] font-medium transition-colors ${isActive ? 'text-ink-black' : 'text-warm-gray hover:text-ink-black'}`
 );
 
 const SiteHeader = ({ onOpenRepos }) => {
@@ -15,14 +15,14 @@ const SiteHeader = ({ onOpenRepos }) => {
 
   return (
     <header className="sticky top-0 z-40 border-b border-sand/80 bg-warm-canvas/95 backdrop-blur">
-      <nav className="content-shell relative flex min-h-[4.5rem] items-center justify-between sm:min-h-20">
-        <Link to="/" className="shrink-0 text-base font-semibold tracking-tight text-ink-black">
+      <nav className="content-shell relative flex min-h-[4.75rem] items-center justify-between sm:min-h-[5.25rem]">
+        <Link to="/" className="shrink-0 text-lg font-semibold tracking-tight text-ink-black">
           Codebase Intel
         </Link>
 
-        <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-8 md:flex">
+        <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-10 md:flex">
           {user && onOpenRepos && (
-            <button onClick={onOpenRepos} className="text-sm font-medium text-warm-gray transition-colors hover:text-ink-black">Codebases</button>
+            <button onClick={onOpenRepos} className="text-[15px] font-medium text-warm-gray transition-colors hover:text-ink-black">Codebases</button>
           )}
           <NavLink to="/platform" className={navClass}>Platform</NavLink>
           <NavLink to="/pricing" className={navClass}>Pricing</NavLink>
@@ -48,7 +48,7 @@ const SiteHeader = ({ onOpenRepos }) => {
       </nav>
       {mobileMenuOpen && (
         <div className="absolute inset-x-0 top-full z-30 border-b border-sand bg-warm-canvas py-4 md:hidden">
-          <div className="content-shell flex flex-col gap-4 text-sm font-medium">
+          <div className="content-shell flex flex-col gap-5 text-[15px] font-medium">
             {user && onOpenRepos && <button onClick={() => { setMobileMenuOpen(false); onOpenRepos(); }} className="text-left text-charcoal">Codebases</button>}
             <NavLink onClick={() => setMobileMenuOpen(false)} to="/platform" className={navClass}>Platform</NavLink>
             <NavLink onClick={() => setMobileMenuOpen(false)} to="/pricing" className={navClass}>Pricing</NavLink>
