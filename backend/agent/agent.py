@@ -1,4 +1,5 @@
 from agent.nemotron import complete
+from config import get_answer_model_options
 
 
 async def run_agent_loop(
@@ -7,6 +8,7 @@ async def run_agent_loop(
     question: str,
     initial_context: str,
     conversation_history: list[dict] | None = None,
+    model_profile: str = "fast",
 ):
     """Generate a grounded answer from bounded, retrieved repository evidence.
 
@@ -49,4 +51,10 @@ Use only the sections that help answer the question. Keep routine answers concis
             f"Repository evidence:\n{initial_context}\n\nQuestion: {question}"
         ),
     })
-    return await complete(messages), []
+    model, enable_thinking, max_tokens = get_answer_model_options(model_profile)
+    return await complete(
+        messages,
+        model=model,
+        enable_thinking=enable_thinking,
+        max_tokens=max_tokens,
+    ), []

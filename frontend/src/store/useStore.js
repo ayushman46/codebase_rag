@@ -109,7 +109,7 @@ const useStore = create((set, get) => ({
     }));
   },
 
-  askQuestion: async (question) => {
+  askQuestion: async (question, modelProfile = 'fast') => {
     const repo = get().selectedRepo;
     if (!repo) return;
 
@@ -120,7 +120,7 @@ const useStore = create((set, get) => ({
     }));
 
     try {
-      const res = await queryRepo(repo, question);
+      const res = await queryRepo(repo, question, modelProfile);
       const data = res.data;
       
       const assistantMsg = {
@@ -129,7 +129,8 @@ const useStore = create((set, get) => ({
         citations: data.citations,
         tool_calls: data.tool_calls,
         mode: data.mode,
-        latency_ms: data.latency_ms
+        latency_ms: data.latency_ms,
+        model_profile: data.model_profile,
       };
       
       set((state) => ({

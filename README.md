@@ -63,10 +63,11 @@ Every evidence block contains a file path and `Lstart-Lend` range. The answer pr
 The centralized client in `backend/agent/nemotron.py` uses NVIDIA's OpenAI-compatible endpoint:
 
 - Endpoint: `https://integrate.api.nvidia.com/v1`
-- Model: `nvidia/nemotron-3-super-120b-a12b`
+- Fast model: `nvidia/nemotron-3-super-120b-a12b`
+- Detailed model: `nvidia/nemotron-3-ultra-550b-a55b`
 - Authentication: `NVIDIA_API_KEY`
 - Request settings: `temperature=0.1`, `top_p=0.95`, and a bounded output limit
-- Thinking: enabled for provider processing, but only final answer content is returned to the application
+- Fast answers disable extended thinking for responsiveness. Detailed answers use the higher-capacity model with extended thinking. Only final answer content is returned to the application.
 
 The current frontend uses ordinary JSON responses rather than a streaming protocol, so the backend preserves that contract. Provider timeouts, connection failures, status failures, and malformed responses are mapped to controlled API errors. Model reasoning content is never returned to the frontend.
 
@@ -105,6 +106,7 @@ Copy `.env.example` to `.env` and set the values required by the deployment:
 NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NEMOTRON_MODEL=nvidia/nemotron-3-super-120b-a12b
+DETAILED_NEMOTRON_MODEL=nvidia/nemotron-3-ultra-550b-a55b
 EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 EMBEDDING_DIMENSION=2048
 EMBEDDING_BATCH_SIZE=4

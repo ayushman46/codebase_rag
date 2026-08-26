@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # A strong, low-latency MoE model for source-grounded RAG. It has far fewer
     # active parameters than Ultra while retaining long-context coding support.
     nemotron_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    detailed_nemotron_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     embedding_model: str = "nvidia/nemotron-3-embed-1b"
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
@@ -24,6 +25,8 @@ class Settings(BaseSettings):
     # reasoning and oversized generations keeps the interactive chat responsive.
     nvidia_enable_thinking: bool = False
     answer_max_tokens: int = 900
+    detailed_nvidia_enable_thinking: bool = True
+    detailed_answer_max_tokens: int = 1_800
     # Keep hosted embedding requests deliberately small. Code chunks can be
     # substantially larger than ordinary chat inputs, and large batches are
     # more likely to be rejected by a shared hosted endpoint.
@@ -84,6 +87,17 @@ def get_cors_origins() -> list[str]:
 def should_run_local_ingestion_worker() -> bool:
     """Return whether this service instance should process queued ingestion jobs."""
     return settings.local_ingestion_worker
+
+
+def get_answer_model_options(profile: str) -> tuple[str, bool, int]:
+    """Resolve an allow-listed chat profile without accepting model IDs from clients."""
+    if profile == "detailed":
+        return (
+            settings.detailed_nemotron_model,
+            settings.detailed_nvidia_enable_thinking,
+            settings.detailed_answer_max_tokens,
+        )
+    return settings.nemotron_model, settings.nvidia_enable_thinking, settings.answer_max_tokens
 
 
 class RateLimiter:

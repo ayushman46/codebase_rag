@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -24,6 +25,7 @@ async def run_query(query):
 class QueryRequest(BaseModel):
     repo_name: str = Field(min_length=1, max_length=200)
     question: str = Field(min_length=1, max_length=4_000)
+    model_profile: Literal["fast", "detailed"] = "fast"
 
 
 async def get_owned_repo(supabase_client, repo_name: str, user_id: str):
@@ -115,7 +117,7 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
             raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
         try:
             answer, tool_calls = await run_agent_loop(
-                supabase_client, repo["id"], question, context, conversation_history
+                supabase_client, repo["id"], question, context, conversation_history, req.model_profile
             )
             mode = "rag"
         except (LLMProviderError, ModelConfigurationError):
@@ -146,7 +148,7 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         )
         return {
             "answer": answer, "mode": mode, "citations": citations, "tool_calls": tool_calls,
-            "latency_ms": latency_ms, "tokens_used": 0,
+            "latency_ms": latency_ms, "tokens_used": 0, "model_profile": req.model_profile,
         }
     except HTTPException:
         raise

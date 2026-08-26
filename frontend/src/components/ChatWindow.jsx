@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, ArrowLeft } from 'lucide-react';
+import { Send, Loader2, ArrowLeft, ChevronDown } from 'lucide-react';
 import useStore from '../store/useStore';
 import MessageBubble from './MessageBubble';
 
@@ -18,6 +18,7 @@ const greeting = () => {
 const ChatWindow = ({ onClose }) => {
   const { selectedRepo, user, messages, askQuestion, isQuerying, isHistoryLoading } = useStore();
   const [input, setInput] = useState('');
+  const [modelProfile, setModelProfile] = useState('fast');
   const bottomRef = useRef(null);
   const isEmpty = messages.length === 0 && !isQuerying && !isHistoryLoading;
   const name = firstName(user);
@@ -29,7 +30,7 @@ const ChatWindow = ({ onClose }) => {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!input.trim() || isQuerying || isHistoryLoading) return;
-    askQuestion(input);
+    askQuestion(input, modelProfile);
     setInput('');
   };
 
@@ -40,9 +41,22 @@ const ChatWindow = ({ onClose }) => {
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder="Ask about this codebase"
-        className="h-14 w-full bg-transparent pl-5 pr-20 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6"
+        className="h-14 w-full bg-transparent pl-5 pr-48 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6 sm:pr-56"
         disabled={isQuerying || isHistoryLoading}
       />
+      <div className="absolute right-[4.5rem] flex items-center text-warm-gray sm:right-[5rem]">
+        <select
+          value={modelProfile}
+          onChange={(event) => setModelProfile(event.target.value)}
+          disabled={isQuerying || isHistoryLoading}
+          aria-label="Answer model"
+          className="h-10 max-w-[7.5rem] appearance-none bg-transparent px-2 pr-6 text-xs font-semibold text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
+        >
+          <option value="fast">Fast</option>
+          <option value="detailed">Detailed</option>
+        </select>
+        <ChevronDown className="pointer-events-none absolute right-1 h-3.5 w-3.5" aria-hidden="true" />
+      </div>
       <button
         type="submit"
         disabled={isQuerying || isHistoryLoading || !input.trim()}

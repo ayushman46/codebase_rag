@@ -32,6 +32,16 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(client.get("/").status_code, 200)
         self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
 
+    def test_answer_model_profiles_are_allow_listed(self):
+        from api.query_router import QueryRequest
+        from config import get_answer_model_options
+        from pydantic import ValidationError
+
+        self.assertEqual(get_answer_model_options("fast")[0], "nvidia/nemotron-3-super-120b-a12b")
+        self.assertEqual(get_answer_model_options("detailed")[0], "nvidia/nemotron-3-ultra-550b-a55b")
+        with self.assertRaises(ValidationError):
+            QueryRequest(repo_name="demo", question="Where is login?", model_profile="untrusted/model")
+
     def test_github_url_normalization_rejects_non_repository_urls(self):
         self.assertEqual(
             normalize_github_url(" https://github.com/octocat/Hello-World/ "),
