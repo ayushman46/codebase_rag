@@ -50,10 +50,10 @@ const ChatWindow = ({ onClose }) => {
           onChange={(event) => setModelProfile(event.target.value)}
           disabled={isQuerying || isHistoryLoading}
           aria-label="Answer model"
-          className="h-10 max-w-[7.5rem] appearance-none bg-transparent px-2 pr-6 text-xs font-semibold text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
+          className="h-10 max-w-[10.75rem] appearance-none bg-transparent px-2 pr-6 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
         >
-          <option value="fast">Fast</option>
-          <option value="detailed">Detailed</option>
+          <option value="fast">Super 120B · Fast</option>
+          <option value="detailed">Ultra 550B · Detailed</option>
         </select>
         <ChevronDown className="pointer-events-none absolute right-1 h-3.5 w-3.5" aria-hidden="true" />
       </div>
