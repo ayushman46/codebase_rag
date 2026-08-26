@@ -9,7 +9,7 @@ from config import require_nvidia_api_key, settings
 
 EMBEDDING_DIMENSION = settings.embedding_dimension
 _client = None
-_request_times: deque[float] = deque()
+_request_times: deque[tuple[float, str]] = deque()
 _rate_limit_lock = threading.Lock()
 
 
@@ -17,18 +17,21 @@ class EmbeddingUnavailableError(RuntimeError):
     pass
 
 
-def wait_for_embedding_slot():
-    """Throttle hosted embedding requests across ingestion and query threads."""
+def wait_for_embedding_slot(input_type: str):
+    """Throttle embeddings while reserving capacity for live repository questions."""
     calls_per_minute = max(1, settings.nvidia_calls_per_minute)
+    is_query = input_type == "query"
+    passage_limit = max(1, calls_per_minute - max(0, settings.query_embedding_reserve_per_minute))
     while True:
         with _rate_limit_lock:
             now = time.monotonic()
-            while _request_times and now - _request_times[0] >= 60:
+            while _request_times and now - _request_times[0][0] >= 60:
                 _request_times.popleft()
-            if len(_request_times) < calls_per_minute:
-                _request_times.append(now)
+            recent_calls = len(_request_times)
+            if recent_calls < (calls_per_minute if is_query else passage_limit):
+                _request_times.append((now, input_type))
                 return
-            wait_seconds = max(0.1, 60 - (now - _request_times[0]))
+            wait_seconds = max(0.1, 60 - (now - _request_times[0][0]))
         time.sleep(wait_seconds)
 
 
@@ -71,7 +74,7 @@ def embed_texts(texts: List[str], *, input_type: str) -> List[List[float]]:
     attempts = max(1, settings.embedding_retry_attempts)
     for attempt in range(attempts):
         try:
-            wait_for_embedding_slot()
+            wait_for_embedding_slot(input_type)
             response = get_embedding_client().embeddings.create(
                 model=settings.embedding_model,
                 input=texts,

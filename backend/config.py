@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
     nvidia_calls_per_minute: int = 20
+    # Preserve a few embedding slots for interactive questions while a large
+    # repository is being indexed in the background.
+    query_embedding_reserve_per_minute: int = 4
+    # Answers are source-grounded and intentionally concise. Avoiding extended
+    # reasoning and oversized generations keeps the interactive chat responsive.
+    nvidia_enable_thinking: bool = False
+    answer_max_tokens: int = 1_200
     # Keep hosted embedding requests deliberately small. Code chunks can be
     # substantially larger than ordinary chat inputs, and large batches are
     # more likely to be rejected by a shared hosted endpoint.
@@ -31,7 +38,13 @@ class Settings(BaseSettings):
     max_repository_files: int = 5_000
     max_repository_bytes: int = 25_000_000
     max_repository_chunks: int = 1_500
-    max_context_characters: int = 60_000
+    # Keep enough multi-file evidence for accurate answers without turning each
+    # question into a very large hosted-model request.
+    max_context_characters: int = 28_000
+    retrieval_top_k: int = 6
+    conversation_history_messages: int = 6
+    max_conversation_history_characters: int = 7_200
+    max_conversation_message_characters: int = 1_800
     ingestion_job_timeout_seconds: int = 900
     max_ingestion_attempts: int = 3
     # Run the durable worker in-process so jobs do not remain queued indefinitely.

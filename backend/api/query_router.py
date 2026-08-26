@@ -35,12 +35,22 @@ async def get_owned_repo(supabase_client, repo_name: str, user_id: str):
     return res.data[0]
 
 
-async def get_conversation_history(supabase_client, repo_id: str, user_id: str, limit: int = 10):
+async def get_conversation_history(supabase_client, repo_id: str, user_id: str, limit: int | None = None):
     res = await run_query(
         supabase_client.table("chat_messages").select("role, content")
-        .eq("repo_id", repo_id).eq("user_id", user_id).order("created_at", desc=True).limit(limit)
+        .eq("repo_id", repo_id).eq("user_id", user_id).order("created_at", desc=True)
+        .limit(limit or settings.conversation_history_messages)
     )
-    return list(reversed(res.data or []))
+    remaining = settings.max_conversation_history_characters
+    retained = []
+    for message in res.data or []:
+        content = str(message.get("content") or "").strip()
+        if not content or remaining <= 0:
+            continue
+        content = content[:min(settings.max_conversation_message_characters, remaining)]
+        retained.append({"role": message.get("role"), "content": content})
+        remaining -= len(content)
+    return list(reversed(retained))
 
 
 def build_context(chunks: list[dict]) -> str:
@@ -94,13 +104,15 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         question = req.question.strip()
         if not question:
             raise HTTPException(status_code=422, detail="Question must contain non-whitespace text.")
-        chunks = await retrieve_context(supabase_client, repo["id"], question)
+        chunks, conversation_history = await asyncio.gather(
+            retrieve_context(supabase_client, repo["id"], question, top_k=settings.retrieval_top_k),
+            get_conversation_history(supabase_client, repo["id"], current_user.id),
+        )
         if not chunks:
             raise HTTPException(status_code=422, detail="No repository evidence was available for this question.")
         context = build_context(chunks)
         if not context:
             raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
-        conversation_history = await get_conversation_history(supabase_client, repo["id"], current_user.id)
         try:
             answer, tool_calls = await run_agent_loop(
                 supabase_client, repo["id"], question, context, conversation_history

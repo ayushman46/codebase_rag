@@ -8,7 +8,27 @@ from ingest.embedder import EmbeddingUnavailableError, embed_query
 logger = logging.getLogger(__name__)
 
 async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
-    # 1. Embed the query when NVIDIA is available. A repository may have been
+    # Start database-only retrieval immediately. Query embeddings are hosted
+    # work, so doing this first avoids making keyword search wait on NVIDIA.
+    loop = asyncio.get_running_loop()
+
+    def fetch_sparse():
+        return supabase_client.rpc('match_chunks_sparse', {
+            'p_repo_id': repo_id,
+            'p_query': query,
+            'p_limit': 20
+        }).execute()
+
+    def fetch_readme():
+        return supabase_client.table('chunks').select('id, file_path, start_line, end_line, language, content')\
+            .eq('repo_id', repo_id)\
+            .ilike('file_path', '%readme.md%')\
+            .limit(1).execute()
+
+    sparse_task = loop.run_in_executor(None, fetch_sparse)
+    readme_task = loop.run_in_executor(None, fetch_readme)
+
+    # Embed the query when NVIDIA is available. A repository may have been
     # indexed during a temporary embedding outage, in which case sparse search
     # still provides source-grounded evidence instead of failing the chat.
     try:
@@ -17,10 +37,6 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
         logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
         query_emb = None
     
-    # 2. Run queries concurrently via asyncio wrapping Supabase sync calls
-    # supabase-py is sync, so we run them in executors to not block the event loop
-    loop = asyncio.get_running_loop()
-    
     def fetch_dense():
         return supabase_client.rpc('match_chunks_dense', {
             'p_repo_id': repo_id,
@@ -28,23 +44,7 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
             'p_limit': 20
         }).execute()
 
-    def fetch_sparse():
-        return supabase_client.rpc('match_chunks_sparse', {
-            'p_repo_id': repo_id,
-            'p_query': query,
-            'p_limit': 20
-        }).execute()
-        
-    def fetch_readme():
-        return supabase_client.table('chunks').select('id, file_path, start_line, end_line, language, content')\
-            .eq('repo_id', repo_id)\
-            .ilike('file_path', '%readme.md%')\
-            .limit(1).execute()
-
-    retrieval_tasks = [
-        loop.run_in_executor(None, fetch_sparse),
-        loop.run_in_executor(None, fetch_readme),
-    ]
+    retrieval_tasks = [sparse_task, readme_task]
     if query_emb is not None:
         retrieval_tasks.insert(0, loop.run_in_executor(None, fetch_dense))
     results = await asyncio.gather(*retrieval_tasks)

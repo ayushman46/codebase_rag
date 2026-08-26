@@ -146,7 +146,7 @@ class BackendSmokeTests(unittest.TestCase):
             SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]),
         ]
         with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
-             patch("ingest.embedder.wait_for_embedding_slot"), \
+                 patch("ingest.embedder.wait_for_embedding_slot"), \
              patch("ingest.embedder.time.sleep"):
             vectors = embed_texts(["retry this embedding"], input_type="passage")
 
@@ -169,7 +169,7 @@ class BackendSmokeTests(unittest.TestCase):
             SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]),
         ]
         with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
-             patch("ingest.embedder.wait_for_embedding_slot"), \
+                 patch("ingest.embedder.wait_for_embedding_slot"), \
              patch("ingest.embedder.time.sleep") as sleep:
             embed_texts(["retry this embedding"], input_type="passage")
 
@@ -226,7 +226,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(asyncio.run(run_test()), "Grounded answer")
         request = fake_client.chat.completions.create.await_args.kwargs
         self.assertEqual(request["model"], "nvidia/nemotron-3-ultra-550b-a55b")
-        self.assertEqual(request["extra_body"], {"chat_template_kwargs": {"enable_thinking": True}})
+        self.assertEqual(request["max_tokens"], 1200)
+        self.assertEqual(request["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}})
 
     def test_nemotron_retries_a_transient_generation_failure(self):
         from httpx import Request, Response

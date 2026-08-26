@@ -29,7 +29,7 @@ def retry_delay(error: Exception, attempt: int) -> float:
     return min(30.0, settings.embedding_retry_base_seconds * (2 ** attempt))
 
 
-async def complete(messages: list[dict[str, Any]], *, max_tokens: int = 4096) -> str:
+async def complete(messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> str:
     """Return final answer content while intentionally discarding private reasoning."""
     api_key = require_nvidia_api_key()
     client = AsyncOpenAI(
@@ -48,8 +48,8 @@ async def complete(messages: list[dict[str, Any]], *, max_tokens: int = 4096) ->
                     messages=messages,
                     temperature=0.1,
                     top_p=0.95,
-                    max_tokens=max_tokens,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                    max_tokens=max_tokens or settings.answer_max_tokens,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": settings.nvidia_enable_thinking}},
                 )
                 if not response.choices:
                     raise LLMProviderError("NVIDIA returned an empty completion.")
