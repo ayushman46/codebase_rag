@@ -63,7 +63,7 @@ Every evidence block contains a file path and `Lstart-Lend` range. The answer pr
 The centralized client in `backend/agent/nemotron.py` uses NVIDIA's OpenAI-compatible endpoint:
 
 - Endpoint: `https://integrate.api.nvidia.com/v1`
-- Model: `nvidia/nemotron-3-ultra-550b-a55b`
+- Model: `nvidia/nemotron-3-super-120b-a12b`
 - Authentication: `NVIDIA_API_KEY`
 - Request settings: `temperature=0.1`, `top_p=0.95`, and a bounded output limit
 - Thinking: enabled for provider processing, but only final answer content is returned to the application
@@ -104,7 +104,7 @@ Copy `.env.example` to `.env` and set the values required by the deployment:
 ```env
 NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
-NEMOTRON_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+NEMOTRON_MODEL=nvidia/nemotron-3-super-120b-a12b
 EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 EMBEDDING_DIMENSION=2048
 EMBEDDING_BATCH_SIZE=4

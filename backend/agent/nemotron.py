@@ -49,7 +49,12 @@ async def complete(messages: list[dict[str, Any]], *, max_tokens: int | None = N
                     temperature=0.1,
                     top_p=0.95,
                     max_tokens=max_tokens or settings.answer_max_tokens,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": settings.nvidia_enable_thinking}},
+                    extra_body={
+                        "chat_template_kwargs": {
+                            "enable_thinking": settings.nvidia_enable_thinking,
+                            "force_nonempty_content": True,
+                        },
+                    },
                 )
                 if not response.choices:
                     raise LLMProviderError("NVIDIA returned an empty completion.")

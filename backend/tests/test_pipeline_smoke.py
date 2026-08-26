@@ -225,9 +225,12 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run_test()), "Grounded answer")
         request = fake_client.chat.completions.create.await_args.kwargs
-        self.assertEqual(request["model"], "nvidia/nemotron-3-ultra-550b-a55b")
-        self.assertEqual(request["max_tokens"], 1200)
-        self.assertEqual(request["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(request["model"], "nvidia/nemotron-3-super-120b-a12b")
+        self.assertEqual(request["max_tokens"], 900)
+        self.assertEqual(
+            request["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": False, "force_nonempty_content": True}},
+        )
 
     def test_nemotron_retries_a_transient_generation_failure(self):
         from httpx import Request, Response

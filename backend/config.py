@@ -10,7 +10,9 @@ ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 class Settings(BaseSettings):
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nemotron_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
+    # A strong, low-latency MoE model for source-grounded RAG. It has far fewer
+    # active parameters than Ultra while retaining long-context coding support.
+    nemotron_model: str = "nvidia/nemotron-3-super-120b-a12b"
     embedding_model: str = "nvidia/nemotron-3-embed-1b"
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
@@ -21,7 +23,7 @@ class Settings(BaseSettings):
     # Answers are source-grounded and intentionally concise. Avoiding extended
     # reasoning and oversized generations keeps the interactive chat responsive.
     nvidia_enable_thinking: bool = False
-    answer_max_tokens: int = 1_200
+    answer_max_tokens: int = 900
     # Keep hosted embedding requests deliberately small. Code chunks can be
     # substantially larger than ordinary chat inputs, and large batches are
     # more likely to be rejected by a shared hosted endpoint.

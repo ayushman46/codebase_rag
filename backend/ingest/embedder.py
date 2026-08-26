@@ -1,6 +1,7 @@
 import threading
 import time
 from collections import deque
+from functools import lru_cache
 from typing import Dict, List
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
@@ -109,7 +110,9 @@ def embed_texts(texts: List[str], *, input_type: str) -> List[List[float]]:
     return vectors
 
 
+@lru_cache(maxsize=128)
 def embed_query(query: str) -> List[float]:
+    """Cache repeated interactive searches to avoid a second hosted request."""
     return embed_texts([query], input_type="query")[0]
 
 def embed_chunks(chunks: List[Dict]) -> List[Dict]:
