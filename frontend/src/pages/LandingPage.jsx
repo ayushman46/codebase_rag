@@ -7,7 +7,7 @@ const LandingPage = () => {
   const { authError, clearAuthError, user } = useStore();
 
   return (
-    <main className="content-shell landing-page page-section">
+    <main className="content-shell flex min-h-[calc(100dvh-3.5rem)] items-center justify-center py-12 sm:py-16">
       <section className="mx-auto flex w-full max-w-3xl flex-col items-center text-center">
         <div className="space-y-6">
           <h1 className="heading-display landing-title text-ink-black">Know the code before you change it.</h1>
