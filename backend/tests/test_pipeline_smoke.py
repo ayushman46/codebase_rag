@@ -70,19 +70,22 @@ class BackendSmokeTests(unittest.TestCase):
             ["repos", "repos", "chunks", "kt_cache"],
         )
 
-    def test_get_files_to_process_skips_binary_lockfiles_large_files_and_symlinks(self):
+    def test_get_files_to_process_accepts_larger_source_files_and_skips_oversized_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src").mkdir()
             (root / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            (root / "src" / "extended.py").write_text("x" * 1_100_000, encoding="utf-8")
+            (root / "src" / "oversized.py").write_text("x" * 2_000_001, encoding="utf-8")
             (root / "package-lock.json").write_text('{"lock": true}', encoding="utf-8")
             (root / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00binary")
             (root / "bundle.min.js").write_text("var a=1;", encoding="utf-8")
             (root / "README.md").write_text("# Hello\n", encoding="utf-8")
             (root / "link.py").symlink_to(root / "src" / "main.py")
 
-            names = {Path(path).name for path in get_files_to_process(str(root))}
-            self.assertEqual(names, {"main.py", "README.md"})
+            with patch("ingest.cloner.settings.max_file_size_bytes", 2_000_000):
+                names = {Path(path).name for path in get_files_to_process(str(root))}
+            self.assertEqual(names, {"main.py", "extended.py", "README.md"})
 
     def test_chunking_preserves_actual_line_ranges_and_symbols(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +325,7 @@ class BackendSmokeTests(unittest.TestCase):
             def select(self, *_args): return self
             def eq(self, *_args): return self
             def ilike(self, *_args): return self
+            def order(self, *_args): return self
             def limit(self, *_args): return self
 
         class FakeSupabase:
@@ -332,9 +336,48 @@ class BackendSmokeTests(unittest.TestCase):
 
         async def run_test():
             with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
-                return await retrieve_context(FakeSupabase(), "repo-1", "login", top_k=2)
+                return await retrieve_context(FakeSupabase(), "repo-1", "what is this codebase architecture?", top_k=2)
         results = asyncio.run(run_test())
         self.assertEqual([chunk["id"] for chunk in results], ["readme", "a"])
+
+    def test_file_path_question_prioritizes_requested_source_chunks(self):
+        from retrieval.retriever import retrieve_context
+
+        dense = [{"id": "other", "file_path": "README.md", "start_line": 1, "end_line": 2, "language": "md", "content": "overview"}]
+        sparse = [{"id": "other", "file_path": "README.md", "start_line": 1, "end_line": 2, "language": "md", "content": "overview"}]
+        schema = [
+            {"id": "schema-1", "file_path": "sql/schema.sql", "start_line": 1, "end_line": 4, "language": "sql", "symbols": [], "content": "create table repos"},
+            {"id": "schema-2", "file_path": "sql/schema.sql", "start_line": 5, "end_line": 8, "language": "sql", "symbols": [], "content": "create table chunks"},
+        ]
+
+        class FakeRequest:
+            def __init__(self, data):
+                self.data = data
+                self.path_filter = None
+            def execute(self):
+                if self.path_filter == "sql/schema.sql":
+                    return SimpleNamespace(data=schema)
+                return SimpleNamespace(data=self.data)
+            def select(self, *_args): return self
+            def eq(self, *_args): return self
+            def ilike(self, _column, value):
+                self.path_filter = value
+                return self
+            def order(self, *_args): return self
+            def limit(self, *_args): return self
+
+        class FakeSupabase:
+            def rpc(self, name, _args):
+                return FakeRequest(dense if name.endswith("dense") else sparse)
+            def table(self, _name):
+                return FakeRequest([])
+
+        async def run_test():
+            with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
+                return await retrieve_context(FakeSupabase(), "repo-1", "Show me sql/schema.sql", top_k=2)
+
+        results = asyncio.run(run_test())
+        self.assertEqual([chunk["id"] for chunk in results], ["schema-1", "schema-2"])
 
     def test_keyword_retrieval_remains_available_when_query_embeddings_are_unavailable(self):
         from ingest.embedder import EmbeddingUnavailableError
@@ -348,6 +391,7 @@ class BackendSmokeTests(unittest.TestCase):
             def select(self, *_args): return self
             def eq(self, *_args): return self
             def ilike(self, *_args): return self
+            def order(self, *_args): return self
             def limit(self, *_args): return self
 
         class FakeSupabase:

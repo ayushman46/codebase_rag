@@ -42,11 +42,15 @@ class Settings(BaseSettings):
     # Protect the service from excessively large repository ingestion jobs.
     max_repository_files: int = 5_000
     max_repository_bytes: int = 25_000_000
+    # Source files are chunked before embedding, so this is a per-file safety
+    # limit rather than a provider input limit. Five MB covers large source and
+    # schema files while the repository-wide limits below remain in effect.
+    max_file_size_bytes: int = 5_000_000
     max_repository_chunks: int = 1_500
-    # Keep enough multi-file evidence for accurate answers without turning each
-    # question into a very large hosted-model request.
-    max_context_characters: int = 28_000
-    retrieval_top_k: int = 6
+    # Retain enough diverse evidence for accurate multi-file answers without
+    # turning each question into an excessively large hosted-model request.
+    max_context_characters: int = 40_000
+    retrieval_top_k: int = 8
     conversation_history_messages: int = 6
     max_conversation_history_characters: int = 7_200
     max_conversation_message_characters: int = 1_800

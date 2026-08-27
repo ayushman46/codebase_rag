@@ -9,7 +9,6 @@ from git import GitCommandError, Repo
 from config import settings
 
 REPOS_DIR = Path("./repos_temp")
-MAX_FILE_SIZE_BYTES = 1_000_000
 
 IGNORE_DIRS = {
     "node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build",
@@ -124,7 +123,7 @@ def should_process_file(filepath: str) -> bool:
     if lower_name in SKIP_FILENAMES or ".min." in lower_name:
         return False
     try:
-        if os.path.getsize(filepath) > MAX_FILE_SIZE_BYTES:
+        if os.path.getsize(filepath) > settings.max_file_size_bytes:
             return False
     except OSError:
         return False
