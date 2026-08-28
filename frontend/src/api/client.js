@@ -28,6 +28,8 @@ export const ingestRepo = (github_url) => api.post('/ingest', { github_url });
 export const queryRepo = (repo_name, question, model_profile = 'fast') => api.post('/query', { repo_name, question, model_profile });
 export const getConversation = (repo_name) => api.get(`/conversations/${encodeURIComponent(repo_name)}`);
 export const getRepos = () => api.get('/repos');
+export const renameRepository = (repo_name, new_repo_name) => api.patch(`/repos/${encodeURIComponent(repo_name)}`, { repo_name: new_repo_name });
+export const deleteRepository = (repo_name) => api.delete(`/repos/${encodeURIComponent(repo_name)}`);
 export const getStatus = (repo_name) => api.get(`/status/${repo_name}`);
 export const cancelIndexing = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/cancel-indexing`);
 export const reindexRepository = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/reindex`);

@@ -20,6 +20,7 @@ class BackendSmokeTests(unittest.TestCase):
         query.eq.return_value = query
         query.order.return_value = query
         query.limit.return_value = query
+        query.update.return_value = query
         query.delete.return_value = query
         query.insert.return_value = query
         query.execute.return_value = SimpleNamespace(data=data)
@@ -595,10 +596,12 @@ class BackendSmokeTests(unittest.TestCase):
             status_response = client.get("/api/status/demo")
             list_response = client.get("/api/repos")
             delete_response = client.delete("/api/repos/demo")
+            rename_response = client.patch("/api/repos/demo", json={"repo_name": "renamed-demo"})
         app.dependency_overrides.clear()
         self.assertEqual(status_response.json()["chunk_count"], 4)
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(rename_response.json(), {"repo_name": "renamed-demo"})
 
     def test_ingest_endpoint_validates_url_before_creating_record(self):
         from main import app

@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
 from database import (
@@ -15,6 +16,10 @@ from ingest.pipeline import IngestionConflictError, enqueue_ingestion_job, ensur
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class RenameRepositoryRequest(BaseModel):
+    repo_name: str = Field(min_length=1, max_length=200)
 
 
 async def run_query(query):
@@ -65,10 +70,12 @@ async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
     supabase_client = await scoped_client(current_user.access_token)
     try:
         existing = await run_query(
-            supabase_client.table("repos").select("id").eq("repo_name", repo_name).eq("user_id", current_user.id)
+            supabase_client.table("repos").select("id, status").eq("repo_name", repo_name).eq("user_id", current_user.id)
         )
         if not existing.data:
             raise HTTPException(status_code=404, detail="Repository not found.")
+        if existing.data[0]["status"] in {"queued", "cloning", "chunking", "embedding", "summarizing"}:
+            raise HTTPException(status_code=409, detail="Stop indexing before deleting this repository.")
         await run_query(
             supabase_client.table("repos").delete().eq("repo_name", repo_name).eq("user_id", current_user.id)
         )
@@ -78,6 +85,41 @@ async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
         logger.exception("Could not delete repository")
         raise HTTPException(status_code=502, detail="Could not delete repository.") from error
     return {"message": f"Repository {repo_name} deleted successfully"}
+
+
+@router.patch("/repos/{repo_name}")
+async def rename_repo(
+    repo_name: str,
+    payload: RenameRepositoryRequest,
+    current_user=Depends(get_current_user),
+):
+    """Rename one of the signed-in user's repository workspaces."""
+    new_name = " ".join(payload.repo_name.split())
+    if not new_name:
+        raise HTTPException(status_code=422, detail="Repository name must contain visible text.")
+    if new_name == repo_name:
+        return {"repo_name": new_name}
+
+    supabase_client = await scoped_client(current_user.access_token)
+    try:
+        existing = await run_query(
+            supabase_client.table("repos").select("id")
+            .eq("repo_name", repo_name).eq("user_id", current_user.id).limit(1)
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Repository not found.")
+        await run_query(
+            supabase_client.table("repos").update({"repo_name": new_name})
+            .eq("id", existing.data[0]["id"]).eq("user_id", current_user.id)
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        if getattr(error, "code", None) == "23505" or "duplicate key" in str(error).lower():
+            raise HTTPException(status_code=409, detail="You already have a repository with that name.") from error
+        logger.exception("Could not rename repository")
+        raise HTTPException(status_code=502, detail="Could not rename repository.") from error
+    return {"repo_name": new_name}
 
 
 @router.post("/repos/{repo_name}/reindex")

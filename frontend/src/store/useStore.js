@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { cancelIndexing, getConversation, getRepos, getStatus, queryRepo, reindexRepository } from '../api/client';
+import { cancelIndexing, deleteRepository, getConversation, getRepos, getStatus, queryRepo, reindexRepository, renameRepository } from '../api/client';
 import { isSupabaseConfigured, supabase } from '../api/supabase';
 
 const useStore = create((set, get) => ({
@@ -106,6 +106,26 @@ const useStore = create((set, get) => ({
       repos: state.repos.map((item) => item.id === repo.id
         ? { ...item, status: 'cancelled', chunk_count: 0, error_message: 'Indexing stopped by you.' }
         : item),
+    }));
+  },
+
+  renameRepo: async (repo, nextName) => {
+    const response = await renameRepository(repo.repo_name, nextName);
+    const repoName = response.data.repo_name;
+    set((state) => ({
+      repos: state.repos.map((item) => item.id === repo.id ? { ...item, repo_name: repoName } : item),
+      selectedRepo: state.selectedRepo === repo.repo_name ? repoName : state.selectedRepo,
+    }));
+    return repoName;
+  },
+
+  deleteRepo: async (repo) => {
+    await deleteRepository(repo.repo_name);
+    set((state) => ({
+      repos: state.repos.filter((item) => item.id !== repo.id),
+      ...(state.selectedRepo === repo.repo_name
+        ? { selectedRepo: null, messages: [], isHistoryLoading: false }
+        : {}),
     }));
   },
 

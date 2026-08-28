@@ -1,20 +1,12 @@
-import { Check, CircleAlert, Clock3, FileSearch, GitBranch, Loader2, Sparkles } from 'lucide-react';
-
 const stages = [
-  { id: 'queued', label: 'Queued', detail: 'Your repository is safely queued and waiting for the next indexing worker.', icon: Clock3 },
-  { id: 'cloning', label: 'Cloning', detail: 'Creating a shallow, temporary copy of the public repository.', icon: GitBranch },
-  { id: 'chunking', label: 'Reading code', detail: 'Finding supported source files and organizing them into useful code sections.', icon: FileSearch },
-  { id: 'embedding', label: 'Indexing', detail: 'Building the semantic index used to retrieve relevant code evidence.', icon: Sparkles },
-  { id: 'summarizing', label: 'Mapping', detail: 'Preparing the architecture summary and onboarding context.', icon: Sparkles },
+  { id: 'queued', label: 'Queued', detail: 'Your repository is queued and will begin when the indexing worker is available.' },
+  { id: 'cloning', label: 'Cloning', detail: 'Creating a temporary copy of the public repository.' },
+  { id: 'chunking', label: 'Reading code', detail: 'Finding source files and organizing them into useful sections.' },
+  { id: 'embedding', label: 'Indexing', detail: 'Building the semantic index used to retrieve relevant evidence.' },
+  { id: 'summarizing', label: 'Mapping', detail: 'Preparing the repository map and onboarding context.' },
 ];
 
 const stageIndex = (status) => stages.findIndex((stage) => stage.id === status);
-
-const statusStyles = {
-  ready: 'bg-emerald-600 text-white',
-  failed: 'bg-red-600 text-white',
-  pending: 'bg-charcoal text-white',
-};
 
 export const isIngestionActive = (status) => stageIndex(status) >= 0;
 
@@ -46,7 +38,6 @@ const IngestionProgress = ({ repo, compact = false }) => {
   const isReady = repo.status === 'ready';
   const isFailed = repo.status === 'failed';
   const active = isIngestionActive(repo.status);
-  const Icon = isReady ? Check : isFailed ? CircleAlert : info.icon || Loader2;
   const baseProgress = Math.round(((info.index + 1) / stages.length) * 100);
   const progress = isReady ? 100 : isFailed ? 0 : info.embeddingProgress
     ? Math.round(((info.index + (info.embeddingProgress.percent / 100)) / stages.length) * 100)
@@ -78,40 +69,26 @@ const IngestionProgress = ({ repo, compact = false }) => {
   }
 
   return (
-    <section className={`rounded-3xl border p-5 text-left shadow-sm ${isFailed ? 'border-red-200 bg-red-50' : isReady ? 'border-emerald-200 bg-emerald-50' : 'border-sand bg-pure-white'}`} aria-live="polite">
-      <div className="flex items-start gap-3">
-        <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${isFailed ? 'bg-red-100 text-red-600' : isReady ? 'bg-emerald-100 text-emerald-700' : 'bg-ember-orange/10 text-ember-orange'}`}>
-          <Icon className={`h-4 w-4 ${active ? 'animate-spin' : ''}`} />
+    <section className={`border px-6 py-5 text-left shadow-sm sm:px-7 ${isFailed ? 'border-red-200 bg-red-50' : isReady ? 'border-emerald-200 bg-emerald-50' : 'border-sand bg-pure-white'}`} aria-live="polite">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+        <div>
+          <p className="text-lg font-semibold tracking-tight text-ink-black">{repo.repo_name}</p>
+          <p className={`mt-1 text-xs font-semibold ${isFailed ? 'text-red-600' : isReady ? 'text-emerald-700' : 'text-ember-orange'}`}>{isReady ? 'Ready to explore' : isFailed ? 'Needs attention' : info.label}</p>
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="font-semibold text-ink-black">{repo.repo_name}</p>
-            <span className={`rounded-full px-2.5 py-1 text-caption font-semibold uppercase tracking-wider ${statusStyles[isReady ? 'ready' : isFailed ? 'failed' : 'pending']}`}>{isReady ? 'Ready' : isFailed ? 'Failed' : info.embeddingProgress ? `${info.embeddingProgress.percent}% indexed` : `Step ${info.index + 1} of ${stages.length}`}</span>
-          </div>
-          <p className="mt-1 text-sm leading-relaxed text-pewter">{repo.error_message || info.detail}</p>
-        </div>
+        <span className="text-caption font-semibold uppercase tracking-wider text-warm-gray">{isReady ? 'Complete' : isFailed ? 'Stopped' : info.embeddingProgress ? `${info.embeddingProgress.percent}% indexed` : `Step ${info.index + 1} of ${stages.length}`}</span>
       </div>
+      <p className="mt-4 max-w-2xl text-sm leading-relaxed text-pewter">{repo.error_message || info.detail}</p>
 
       {!isFailed && (
         <>
-          <div className="mt-5 h-2 overflow-hidden rounded-full bg-fog" aria-hidden="true">
-            <div className={`h-full rounded-full transition-[width] duration-700 ${isReady ? 'bg-emerald-500' : 'bg-ember-orange'}`} style={{ width: `${progress}%` }} />
+          <div className="mt-5 h-1 overflow-hidden bg-fog" aria-hidden="true">
+            <div className={`h-full transition-[width] duration-700 ${isReady ? 'bg-emerald-500' : 'bg-ember-orange'}`} style={{ width: `${progress}%` }} />
           </div>
-          <ol className="mt-4 grid grid-cols-5 gap-1" aria-label="Indexing progress">
-            {stages.map((stage, index) => {
-              const complete = isReady || index < info.index;
-              const current = !isReady && index === info.index;
-              return (
-                <li key={stage.id} className="min-w-0 text-center">
-                  <div className={`mx-auto flex h-5 w-5 items-center justify-center rounded-full border text-[10px] ${complete ? 'border-ember-orange bg-ember-orange text-white' : current ? 'border-ember-orange bg-peach-blush text-ink-black' : 'border-sand bg-pure-white text-warm-gray'}`}>
-                    {complete ? <Check className="h-3 w-3" /> : index + 1}
-                  </div>
-                  <span className={`mt-1 block truncate text-[10px] ${current ? 'font-semibold text-ink-black' : 'text-warm-gray'}`}>{stage.label}</span>
-                </li>
-              );
-            })}
-          </ol>
-          {!isReady && <p className="mt-4 text-caption text-warm-gray">Updates automatically every few seconds. Queued work begins when the next indexing worker is available.</p>}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-caption text-warm-gray">
+            <span>{activeLabel}</span>
+            <span>{progress}%</span>
+          </div>
+          {!isReady && <p className="mt-4 text-caption text-warm-gray">This progress updates automatically while the repository is being indexed.</p>}
         </>
       )}
     </section>

@@ -21,7 +21,7 @@ const DashboardPage = () => {
       <SiteHeader onOpenRepos={() => setIsDrawerOpen(true)} />
 
       <aside className={`fixed inset-y-0 left-0 z-50 flex w-full max-w-[360px] flex-col border-r border-sand bg-pure-white shadow-xl transition-transform duration-300 sm:w-[360px] ${isDrawerOpen ? 'translate-x-0' : '-translate-x-full'}`} aria-label="Indexed repositories">
-        <div className="flex items-center justify-between border-b border-sand px-5 py-5 sm:px-6 sm:py-6">
+        <div className="flex items-center justify-between border-b border-sand px-5 py-6 sm:px-6">
           <div><h2 className="text-2xl font-semibold tracking-tight text-ink-black">Codebases</h2><p className="mt-1 text-sm text-warm-gray">Your repositories</p></div>
           <button onClick={() => setIsDrawerOpen(false)} className="p-2 text-slate transition-colors hover:text-ink-black" aria-label="Close repository list"><X className="h-5 w-5" /></button>
         </div>
@@ -29,18 +29,18 @@ const DashboardPage = () => {
       </aside>
       {isDrawerOpen && <button className="fixed inset-0 z-40 cursor-default bg-ink-black/10 backdrop-blur-[2px]" onClick={() => setIsDrawerOpen(false)} aria-label="Close repository list" />}
 
-      <main className={`content-shell flex min-h-[calc(100vh-5rem)] flex-col ${selectedRepo ? 'py-4 sm:py-6' : 'justify-center py-8 sm:py-10'}`}>
+      <main className={`content-shell flex min-h-[calc(100vh-5rem)] flex-col ${selectedRepo ? 'py-4 sm:py-6' : 'justify-center py-12 sm:py-16'}`}>
         {!selectedRepo ? (
-          <section className="mx-auto w-full max-w-2xl py-10 text-center sm:py-16">
+          <section className="mx-auto w-full max-w-3xl text-center">
             <h1 className="heading-display landing-title text-ink-black">Understand any codebase.</h1>
-            <p className="mx-auto mt-6 max-w-md text-body leading-relaxed text-pewter">Paste a public GitHub repository link to ingest and analyze it in your private workspace.</p>
-            <div className="mx-auto mt-10 max-w-xl"><RepoInput /></div>
+            <p className="mx-auto mt-7 max-w-xl text-body leading-relaxed text-pewter">Paste a public GitHub repository link to index its source and explore it with grounded answers.</p>
+            <div className="mx-auto mt-9 max-w-2xl"><RepoInput /></div>
             {activeRepos.length > 0 && (
-              <div className="mx-auto mt-8 max-w-xl space-y-3">
+              <div className="mx-auto mt-7 max-w-2xl space-y-3">
                 {activeRepos.map((repo) => <IngestionProgress key={repo.id} repo={repo} />)}
               </div>
             )}
-            {repos.length > 0 && <button onClick={() => setIsDrawerOpen(true)} className="mt-6 text-sm font-semibold text-ember-orange hover:text-burnt-rust">Browse {repos.length} indexed {repos.length === 1 ? 'codebase' : 'codebases'}</button>}
+            {repos.length > 0 && <button onClick={() => setIsDrawerOpen(true)} className="mt-7 text-sm font-semibold text-ember-orange hover:text-burnt-rust">Browse codebases ({repos.length})</button>}
           </section>
         ) : (
           <section className="flex flex-1 flex-col">
