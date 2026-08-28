@@ -379,6 +379,40 @@ class BackendSmokeTests(unittest.TestCase):
         results = asyncio.run(run_test())
         self.assertEqual([chunk["id"] for chunk in results], ["schema-1", "schema-2"])
 
+    def test_exploratory_question_uses_index_overview_when_terms_do_not_match(self):
+        from retrieval.retriever import retrieve_context
+
+        readme = [{"id": "readme", "file_path": "README.md", "start_line": 1, "end_line": 3, "language": "md", "content": "Project overview"}]
+        overview = [
+            {"id": "api", "file_path": "backend/api.py", "start_line": 1, "end_line": 4, "language": "py", "symbols": [], "content": "app = FastAPI()"},
+            {"id": "client", "file_path": "frontend/client.ts", "start_line": 1, "end_line": 4, "language": "ts", "symbols": [], "content": "export const client = {}"},
+        ]
+
+        class FakeRequest:
+            def __init__(self, data): self.data = data
+            def execute(self): return SimpleNamespace(data=self.data)
+            def select(self, *_args): return self
+            def eq(self, *_args): return self
+            def ilike(self, *_args): return self
+            def order(self, *_args): return self
+            def limit(self, *_args): return self
+
+        class FakeSupabase:
+            def __init__(self): self.table_calls = 0
+            def rpc(self, _name, _args): return FakeRequest([])
+            def table(self, _name):
+                self.table_calls += 1
+                return FakeRequest(readme if self.table_calls == 1 else overview)
+
+        async def run_test():
+            with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
+                return await retrieve_context(
+                    FakeSupabase(), "repo-1", "Explain how this project is different from a typical project", top_k=3
+                )
+
+        results = asyncio.run(run_test())
+        self.assertEqual([chunk["id"] for chunk in results], ["readme", "api", "client"])
+
     def test_keyword_retrieval_remains_available_when_query_embeddings_are_unavailable(self):
         from ingest.embedder import EmbeddingUnavailableError
         from retrieval.retriever import retrieve_context
@@ -429,6 +463,25 @@ class BackendSmokeTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["mode"], "retrieval_fallback")
+
+    def test_query_returns_repository_guidance_when_no_chunks_match(self):
+        from main import app
+        from api.auth import get_current_user
+
+        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
+        fake_supabase = MagicMock()
+        fake_supabase.table.return_value = repo_query
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
+        with patch("api.query_router.assert_supabase_schema"), \
+             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=[])), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock()) as run_agent:
+            response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "hi"})
+        app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mode"], "repository_guidance")
+        self.assertEqual(response.json()["citations"], [])
+        self.assertFalse(run_agent.called)
 
     def test_schema_check_turns_missing_symbol_column_into_actionable_error(self):
         from database import DatabaseConfigurationError, assert_supabase_schema

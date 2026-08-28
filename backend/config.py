@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # turning each question into an excessively large hosted-model request.
     max_context_characters: int = 40_000
     retrieval_top_k: int = 8
+    # Broad architectural questions need a representative sample of the index
+    # when no code-term match exists in the user's wording.
+    overview_retrieval_candidates: int = 64
     conversation_history_messages: int = 6
     max_conversation_history_characters: int = 7_200
     max_conversation_message_characters: int = 1_800

@@ -4,7 +4,7 @@ import re
 from collections import defaultdict
 from typing import Dict, List
 
-from config import ModelConfigurationError
+from config import ModelConfigurationError, settings
 from ingest.embedder import EmbeddingUnavailableError, embed_query
 
 logger = logging.getLogger(__name__)
@@ -17,9 +17,9 @@ FILE_PATH_PATTERN = re.compile(
     r"))(?![\w.-])",
     re.IGNORECASE,
 )
-BROAD_REPOSITORY_PATTERN = re.compile(
-    r"\b(?:overview|architecture|high[- ]level|purpose|what (?:is|does).*?(?:repository|codebase|project)|"
-    r"how does .*?(?:repository|codebase|project) work|about (?:this|the) (?:repository|codebase|project))\b",
+EXPLORATORY_REPOSITORY_PATTERN = re.compile(
+    r"\b(?:overview|architecture|high[- ]level|purpose|different|difference|compare|comparison|"
+    r"unique|distinguish|what makes|how does .*? work|about (?:this|the)|explain|describe)\b",
     re.IGNORECASE,
 )
 MAX_CHUNKS_PER_FILE = 2
@@ -35,9 +35,9 @@ def extract_requested_file_paths(query: str) -> list[str]:
     return paths
 
 
-def is_broad_repository_question(query: str, requested_paths: list[str]) -> bool:
-    """README context helps orientation questions, not source-file questions."""
-    return not requested_paths and bool(BROAD_REPOSITORY_PATTERN.search(query))
+def is_exploratory_repository_question(query: str, requested_paths: list[str]) -> bool:
+    """Use an index overview for high-level questions, never file requests."""
+    return not requested_paths and bool(EXPLORATORY_REPOSITORY_PATTERN.search(query))
 
 
 def select_diverse_chunks(candidates: list[Dict], limit: int, excluded_ids: set[str] | None = None) -> list[Dict]:
@@ -83,7 +83,7 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
         }).execute()
 
     requested_paths = extract_requested_file_paths(query)
-    include_readme = is_broad_repository_question(query, requested_paths)
+    include_overview = is_exploratory_repository_question(query, requested_paths)
 
     def fetch_readme():
         return supabase_client.table('chunks').select('id, file_path, start_line, end_line, language, content')\
@@ -100,8 +100,17 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
             'id, file_path, start_line, end_line, language, symbols, content'
         ).eq('repo_id', repo_id).ilike('file_path', path_filter).order('start_line').limit(top_k).execute()
 
+    def fetch_overview_chunks():
+        """Fetch a small, deterministic sample of real source for broad questions."""
+        return supabase_client.table('chunks').select(
+            'id, file_path, start_line, end_line, language, symbols, content'
+        ).eq('repo_id', repo_id).order('file_path').order('start_line').limit(
+            settings.overview_retrieval_candidates
+        ).execute()
+
     sparse_task = loop.run_in_executor(None, fetch_sparse)
-    readme_task = loop.run_in_executor(None, fetch_readme) if include_readme else None
+    readme_task = loop.run_in_executor(None, fetch_readme) if include_overview else None
+    overview_task = loop.run_in_executor(None, fetch_overview_chunks) if include_overview else None
     file_tasks = [loop.run_in_executor(None, fetch_file_chunks, path) for path in requested_paths]
 
     # Embed the query when NVIDIA is available. A repository may have been
@@ -125,6 +134,8 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
         retrieval_tasks.insert(0, loop.run_in_executor(None, fetch_dense))
     if readme_task is not None:
         retrieval_tasks.append(readme_task)
+    if overview_task is not None:
+        retrieval_tasks.append(overview_task)
     results = await asyncio.gather(*retrieval_tasks)
     if query_emb is not None:
         dense_res, sparse_res, *remaining_results = results
@@ -134,12 +145,14 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
     
     dense_chunks = dense_res.data if dense_res is not None else []
     sparse_chunks = sparse_res.data or []
-    if include_readme:
-        *file_results, readme_res = remaining_results
+    if include_overview:
+        *file_results, readme_res, overview_res = remaining_results
         readme_chunks = readme_res.data or []
+        overview_chunks = overview_res.data or []
     else:
         file_results = remaining_results
         readme_chunks = []
+        overview_chunks = []
     requested_chunk_map = {
         chunk["id"]: chunk for result in file_results for chunk in (result.data or [])
     }
@@ -164,6 +177,11 @@ async def retrieve_context(supabase_client, repo_id: str, query: str, top_k: int
     # Sort by RRF score, then make the final result file-diverse.
     sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
     ranked_chunks = [chunk_map[c_id] for c_id in sorted_ids]
+    ranked_ids = {chunk["id"] for chunk in ranked_chunks}
+    if include_overview:
+        # Retrieval remains the first choice. The overview merely supplies
+        # real, cited source coverage when broad wording has no lexical match.
+        ranked_chunks.extend(chunk for chunk in overview_chunks if chunk["id"] not in ranked_ids)
     requested_ids = {chunk["id"] for chunk in requested_chunks}
     final_chunks = requested_chunks[:top_k]
     if len(final_chunks) < top_k:

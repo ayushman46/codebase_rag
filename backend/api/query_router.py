@@ -93,6 +93,15 @@ def build_retrieval_fallback(chunks: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def build_no_evidence_response() -> str:
+    """Handle greetings and unmatched wording without inventing repo facts."""
+    return (
+        "I can help you explore this repository. Ask about its architecture, "
+        "features, implementation choices, files, or how it differs from a typical approach. "
+        "I will keep the answer grounded in the indexed source."
+    )
+
+
 @router.post("/query")
 async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
     start_time = time.time()
@@ -111,26 +120,27 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
             get_conversation_history(supabase_client, repo["id"], current_user.id),
         )
         if not chunks:
-            raise HTTPException(status_code=422, detail="No repository evidence was available for this question.")
-        context = build_context(chunks)
-        if not context:
-            raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
-        try:
-            answer, tool_calls = await run_agent_loop(
-                supabase_client, repo["id"], question, context, conversation_history, req.model_profile
-            )
-            mode = "rag"
-        except (LLMProviderError, ModelConfigurationError):
-            logger.warning("Live answer generation unavailable for repository %s; returning retrieved evidence", repo["id"])
-            answer, tool_calls, mode = build_retrieval_fallback(chunks), [], "retrieval_fallback"
-        citations = [{
-            "file_path": chunk["file_path"],
-            "start_line": chunk["start_line"],
-            "end_line": chunk["end_line"],
-            "content": chunk["content"],
-            "language": chunk["language"],
-            "symbols": chunk.get("symbols", []),
-        } for chunk in chunks]
+            answer, tool_calls, mode, citations = build_no_evidence_response(), [], "repository_guidance", []
+        else:
+            context = build_context(chunks)
+            if not context:
+                raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
+            try:
+                answer, tool_calls = await run_agent_loop(
+                    supabase_client, repo["id"], question, context, conversation_history, req.model_profile
+                )
+                mode = "rag"
+            except (LLMProviderError, ModelConfigurationError):
+                logger.warning("Live answer generation unavailable for repository %s; returning retrieved evidence", repo["id"])
+                answer, tool_calls, mode = build_retrieval_fallback(chunks), [], "retrieval_fallback"
+            citations = [{
+                "file_path": chunk["file_path"],
+                "start_line": chunk["start_line"],
+                "end_line": chunk["end_line"],
+                "content": chunk["content"],
+                "language": chunk["language"],
+                "symbols": chunk.get("symbols", []),
+            } for chunk in chunks]
         latency_ms = int((time.time() - start_time) * 1000)
         await run_query(
             supabase_client.table("chat_messages").insert([

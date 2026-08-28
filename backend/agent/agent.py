@@ -34,7 +34,9 @@ One or two sentences answering the question immediately.
 ## Where to start
 - Give practical next files or symbols to inspect when the question asks for a change, fix, or contribution.
 
-Use only the sections that help answer the question. Keep routine answers concise; do not repeat the citation content shown separately by the application. Cite every concrete claim using the supplied file path and line range. Do not invent files, symbols, relationships, endpoints, or line numbers. If the evidence is insufficient, say exactly what could not be established from the indexed repository. Do not expose private reasoning."""
+Use only the sections that help answer the question. Keep routine answers concise; do not repeat the citation content shown separately by the application. Cite every concrete claim using the supplied file path and line range. Do not invent files, symbols, relationships, endpoints, or line numbers.
+
+For high-level, comparative, or "what makes this project different" questions, synthesize the supplied evidence across files. You may describe an evidence-supported distinction from typical approaches, but frame it carefully as "this repository appears to..." rather than claiming facts about systems that are not in the evidence. If the evidence is insufficient, say exactly what could not be established from the indexed repository. Do not expose private reasoning."""
     messages = [
         {"role": "system", "content": system_prompt},
     ]
