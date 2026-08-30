@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,13 +45,31 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(ingest_router, prefix="/api")
 app.include_router(query_router, prefix="/api")
 app.include_router(repos_router, prefix="/api")
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # The SPA uses only same-origin scripts and API calls. Supabase is needed
+    # for OAuth/session traffic and remote HTTPS avatars are permitted.
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; connect-src 'self' https://*.supabase.co; "
+        "img-src 'self' https: data:; style-src 'self'; script-src 'self'; "
+        "base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return response
 
 @app.get("/api/health", include_in_schema=False)
 def health_check():

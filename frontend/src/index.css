@@ -2,7 +2,7 @@
 
 @theme {
   /* Colors */
-  --color-ember-orange: #ff3c00;
+  --color-ember-orange: #c93709;
   --color-sunset-coral: #ff764c;
   --color-peach-blush: #ffb199;
   --color-burnt-rust: #ec4e02;
@@ -78,6 +78,19 @@ body {
   font-family: var(--font-abc-diatype);
   background-color: var(--color-warm-canvas);
   color: var(--color-ink-black);
+}
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--color-ink-black);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 #root {

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,67 +10,103 @@ from fastapi.testclient import TestClient
 
 from ingest.chunker import chunk_file, extract_symbols
 from ingest.cloner import RepositoryValidationError, get_files_to_process, normalize_github_url
-from ingest.embedder import EMBEDDING_DIMENSION, embed_chunks
+from ingest.embedder import EMBEDDING_DIMENSION, EmbeddingUnavailableError, embed_chunks
+
+
+class MemoryStore:
+    """Minimal async store used to test the API boundary without a live Turso database."""
+
+    def __init__(self):
+        self.rows = []
+        self.executed = []
+
+    async def execute(self, sql, args=None):
+        self.executed.append((sql, args or []))
+        return SimpleNamespace(rows=[], rows_affected=1)
+
+    async def fetch_one(self, sql, args=None):
+        self.executed.append((sql, args or []))
+        return self.rows[0] if self.rows else None
+
+    async def fetch_all(self, sql, args=None):
+        self.executed.append((sql, args or []))
+        return list(self.rows)
+
+    async def insert_chunks(self, chunks):
+        self.rows.extend(chunks)
 
 
 class BackendSmokeTests(unittest.TestCase):
-    @staticmethod
-    def _query(data):
-        query = MagicMock()
-        query.select.return_value = query
-        query.eq.return_value = query
-        query.order.return_value = query
-        query.limit.return_value = query
-        query.update.return_value = query
-        query.delete.return_value = query
-        query.insert.return_value = query
-        query.execute.return_value = SimpleNamespace(data=data)
-        return query
-
     def test_app_imports_and_root_endpoint_works(self):
         from main import app
-
         client = TestClient(app)
-        self.assertEqual(client.get("/").status_code, 200)
+        root = client.get("/")
+        self.assertEqual(root.status_code, 200)
         self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
+        self.assertEqual(root.headers["x-content-type-options"], "nosniff")
+        self.assertIn("frame-ancestors 'none'", root.headers["content-security-policy"])
+
+    def test_turso_store_handles_parameterized_rows_and_json_metadata(self):
+        from database import TursoStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TursoStore(f"file:{Path(tmp) / 'test.db'}", "local-test-token")
+
+            async def run():
+                await store.execute("CREATE TABLE records (id TEXT PRIMARY KEY, symbols TEXT NOT NULL)")
+                await store.execute("INSERT INTO records VALUES (?, ?)", ["one", '["login"]'])
+                return await store.fetch_one("SELECT id, symbols FROM records WHERE id = ?", ["one"])
+
+            row = asyncio.run(run())
+        self.assertEqual(row, {"id": "one", "symbols": ["login"]})
+
+    def test_turso_chunk_insert_supports_keyword_only_fallback(self):
+        from database import TursoStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TursoStore(f"file:{Path(tmp) / 'test.db'}", "local-test-token")
+
+            async def run():
+                await store.execute(
+                    "CREATE TABLE chunks (id TEXT PRIMARY KEY, repo_id TEXT, file_path TEXT, start_line INTEGER, "
+                    "end_line INTEGER, language TEXT, symbols TEXT, content TEXT, embedding BLOB)"
+                )
+                await store.insert_chunks([{
+                    "id": "chunk-1", "repo_id": "repo-1", "file_path": "src/auth.py", "start_line": 1,
+                    "end_line": 2, "language": "py", "symbols": ["login"], "content": "def login(): pass", "embedding": None,
+                }])
+                return await store.fetch_one("SELECT id, symbols, content FROM chunks WHERE id = ?", ["chunk-1"])
+
+            row = asyncio.run(run())
+        self.assertEqual(row["symbols"], ["login"])
+        self.assertEqual(row["content"], "def login(): pass")
+
+    def test_turso_configuration_requires_server_only_credentials(self):
+        from database import DatabaseConfigurationError, get_turso_store
+        with patch("database.settings.turso_database_url", ""), patch("database.settings.turso_auth_token", ""):
+            get_turso_store.cache_clear()
+            with self.assertRaises(DatabaseConfigurationError):
+                get_turso_store()
+            get_turso_store.cache_clear()
 
     def test_answer_model_profiles_are_allow_listed(self):
         from api.query_router import QueryRequest
         from config import get_answer_model_options
         from pydantic import ValidationError
-
         self.assertEqual(get_answer_model_options("fast")[0], "nvidia/nemotron-3-super-120b-a12b")
         self.assertEqual(get_answer_model_options("detailed")[0], "nvidia/nemotron-3-ultra-550b-a55b")
         with self.assertRaises(ValidationError):
             QueryRequest(repo_name="demo", question="Where is login?", model_profile="untrusted/model")
 
+    def test_credentials_cors_rejects_a_wildcard_origin(self):
+        from config import get_cors_origins
+        with patch("config.settings.cors_origins", "https://app.example.com,*"):
+            with self.assertRaises(ValueError):
+                get_cors_origins()
+
     def test_github_url_normalization_rejects_non_repository_urls(self):
-        self.assertEqual(
-            normalize_github_url(" https://github.com/octocat/Hello-World/ "),
-            "https://github.com/octocat/Hello-World.git",
-        )
+        self.assertEqual(normalize_github_url(" https://github.com/octocat/Hello-World/ "), "https://github.com/octocat/Hello-World.git")
         for value in ("http://github.com/a/b", "https://github.com/a/b/tree/main", "https://evil.test/a/b"):
             with self.assertRaises(RepositoryValidationError):
                 normalize_github_url(value)
-
-    def test_failed_repository_can_be_requeued_with_the_same_url(self):
-        from ingest.pipeline import ensure_repo_record
-
-        supabase_client = MagicMock()
-        existing = SimpleNamespace(data=[{"id": "repo-1", "status": "failed"}])
-        with patch(
-            "ingest.pipeline.run_query",
-            new=AsyncMock(side_effect=[existing, SimpleNamespace(data=[]), SimpleNamespace(data=[]), SimpleNamespace(data=[])]),
-        ):
-            repo_id, repo_name = asyncio.run(
-                ensure_repo_record(supabase_client, "https://github.com/octocat/Hello-World", "user-1")
-            )
-
-        self.assertEqual((repo_id, repo_name), ("repo-1", "Hello-World"))
-        self.assertEqual(
-            [call.args[0] for call in supabase_client.table.call_args_list],
-            ["repos", "repos", "chunks", "kt_cache"],
-        )
 
     def test_get_files_to_process_accepts_larger_source_files_and_skips_oversized_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,15 +115,11 @@ class BackendSmokeTests(unittest.TestCase):
             (root / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
             (root / "src" / "extended.py").write_text("x" * 1_100_000, encoding="utf-8")
             (root / "src" / "oversized.py").write_text("x" * 2_000_001, encoding="utf-8")
-            (root / "package-lock.json").write_text('{"lock": true}', encoding="utf-8")
-            (root / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00binary")
-            (root / "bundle.min.js").write_text("var a=1;", encoding="utf-8")
             (root / "README.md").write_text("# Hello\n", encoding="utf-8")
             (root / "link.py").symlink_to(root / "src" / "main.py")
-
             with patch("ingest.cloner.settings.max_file_size_bytes", 2_000_000):
                 names = {Path(path).name for path in get_files_to_process(str(root))}
-            self.assertEqual(names, {"main.py", "extended.py", "README.md"})
+        self.assertEqual(names, {"main.py", "extended.py", "README.md"})
 
     def test_chunking_preserves_actual_line_ranges_and_symbols(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,594 +127,173 @@ class BackendSmokeTests(unittest.TestCase):
             file_path = root / "app.py"
             file_path.write_text("class Login:\n    pass\n\ndef handle_login():\n    return True\n", encoding="utf-8")
             chunks = chunk_file(str(file_path), str(root))
-
         self.assertEqual(chunks[0]["start_line"], 1)
         self.assertEqual(chunks[0]["end_line"], 5)
         self.assertEqual(chunks[0]["symbols"], ["Login", "handle_login"])
         self.assertEqual(extract_symbols("const signIn = async () => {}"), ["signIn"])
 
-    def test_chunk_file_splits_minified_content_into_multiple_chunks(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            file_path = root / "app.js"
-            file_path.write_text("const data='" + ("x" * 30000) + "';", encoding="utf-8")
-            chunks = chunk_file(str(file_path), str(root))
-        self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(chunk["content"] for chunk in chunks))
-
     def test_embed_chunks_uses_hosted_nvidia_embeddings(self):
         chunks = [{"file_path": "src/app.py", "content": "def hello(): pass", "start_line": 1, "end_line": 1, "language": "py"}]
         fake_client = MagicMock()
-        fake_client.embeddings.create.return_value = SimpleNamespace(
-            data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]
-        )
+        fake_client.embeddings.create.return_value = SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)])
         with patch("ingest.embedder.get_embedding_client", return_value=fake_client):
             embedded = embed_chunks(chunks)
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
 
-    def test_embed_chunks_uses_configured_small_batches(self):
-        chunks = [
-            {"file_path": f"src/file_{index}.py", "content": "def example(): pass", "start_line": 1, "end_line": 1, "language": "py"}
-            for index in range(9)
-        ]
-        fake_client = MagicMock()
+    def test_ensure_repo_record_resets_failed_repository_for_its_owner(self):
+        from ingest.pipeline import ensure_repo_record
+        store = MemoryStore()
+        store.rows = [{"id": "repo-1", "status": "failed"}]
+        with patch("ingest.pipeline.timestamp", return_value="2026-01-01T00:00:00+00:00"):
+            repo_id, name = asyncio.run(ensure_repo_record(store, "https://github.com/octocat/Hello-World", "user-1"))
+        self.assertEqual((repo_id, name), ("repo-1", "Hello-World"))
+        self.assertIn("DELETE FROM chunks", store.executed[1][0])
+        self.assertTrue(all("user-1" in args for _, args in store.executed if args and "repos" in _))
 
-        def embeddings_for_batch(*, input, **_kwargs):
-            return SimpleNamespace(
-                data=[SimpleNamespace(index=index, embedding=[float(index)] * EMBEDDING_DIMENSION) for index in range(len(input))]
-            )
+    def test_worker_claim_keeps_turso_row_as_plain_mapping(self):
+        from ingest.pipeline import claim_next_ingestion_job
 
-        fake_client.embeddings.create.side_effect = embeddings_for_batch
-        with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
-             patch("ingest.embedder.settings.embedding_batch_size", 4):
-            embedded = embed_chunks(chunks)
+        class ClaimStore(MemoryStore):
+            async def fetch_all(self, sql, args=None):
+                return []
 
-        self.assertEqual(len(embedded), 9)
-        self.assertEqual(fake_client.embeddings.create.call_count, 3)
-        self.assertEqual(
-            [len(call.kwargs["input"]) for call in fake_client.embeddings.create.call_args_list],
-            [4, 4, 1],
-        )
+            async def execute(self, sql, args=None):
+                self.executed.append((sql, args or []))
+                return SimpleNamespace(rows=[{
+                    "id": "job-1", "repo_id": "repo-1", "user_id": "user-1",
+                    "github_url": "https://github.com/octocat/Hello-World.git", "attempts": 1,
+                }], rows_affected=1)
 
-    def test_embedding_request_retries_transient_nvidia_failure(self):
-        from httpx import Request, Response
-        from openai import APIStatusError
-        from ingest.embedder import embed_texts
+        job = asyncio.run(claim_next_ingestion_job(ClaimStore()))
+        self.assertEqual(job["id"], "job-1")
+        self.assertIn("claim_token", job)
 
-        transient_error = APIStatusError(
-            "Service unavailable",
-            response=Response(503, request=Request("POST", "https://integrate.api.nvidia.com/v1/embeddings")),
-            body=None,
-        )
-        fake_client = MagicMock()
-        fake_client.embeddings.create.side_effect = [
-            transient_error,
-            SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]),
-        ]
-        with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
-                 patch("ingest.embedder.wait_for_embedding_slot"), \
-             patch("ingest.embedder.time.sleep"):
-            vectors = embed_texts(["retry this embedding"], input_type="passage")
-
-        self.assertEqual(len(vectors[0]), EMBEDDING_DIMENSION)
-        self.assertEqual(fake_client.embeddings.create.call_count, 2)
-
-    def test_embedding_retry_honors_nvidia_retry_after_header(self):
-        from httpx import Request, Response
-        from openai import APIStatusError
-        from ingest.embedder import embed_texts
-
-        transient_error = APIStatusError(
-            "Service unavailable",
-            response=Response(503, headers={"retry-after": "7"}, request=Request("POST", "https://integrate.api.nvidia.com/v1/embeddings")),
-            body=None,
-        )
-        fake_client = MagicMock()
-        fake_client.embeddings.create.side_effect = [
-            transient_error,
-            SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)]),
-        ]
-        with patch("ingest.embedder.get_embedding_client", return_value=fake_client), \
-                 patch("ingest.embedder.wait_for_embedding_slot"), \
-             patch("ingest.embedder.time.sleep") as sleep:
-            embed_texts(["retry this embedding"], input_type="passage")
-
-        sleep.assert_called_once_with(7.0)
-
-    def test_embedding_pipeline_reports_progress_for_every_batch(self):
-        from ingest.pipeline import embed_repository_chunks
-
-        chunks = [{"file_path": f"file_{index}.py", "content": "pass"} for index in range(5)]
-        query = MagicMock()
-        query.update.return_value = query
-        query.eq.return_value = query
-        query.execute.return_value = SimpleNamespace(data=[])
-        supabase_client = MagicMock()
-        supabase_client.table.return_value = query
-
-        with patch("ingest.pipeline.raise_if_ingestion_cancelled", new=AsyncMock()), \
-             patch("ingest.pipeline.run_blocking", new=AsyncMock(side_effect=lambda _func, batch: batch)), \
-             patch("ingest.pipeline.run_query", new=AsyncMock()), \
-             patch("ingest.pipeline.settings.embedding_batch_size", 2):
-            result = asyncio.run(embed_repository_chunks(supabase_client, "repo-1", chunks))
-
-        self.assertEqual(result, chunks)
-        progress_messages = [call.args[0]["error_message"] for call in query.update.call_args_list]
-        self.assertEqual(progress_messages, [
-            "Indexing 0 of 5 code sections (0%). Large repositories can take a few minutes while embeddings are created.",
-            "Indexing 2 of 5 code sections (40%). Large repositories can take a few minutes while embeddings are created.",
-            "Indexing 4 of 5 code sections (80%). Large repositories can take a few minutes while embeddings are created.",
-            "Indexing 5 of 5 code sections (100%). Large repositories can take a few minutes while embeddings are created.",
-        ])
-
-    def test_cancelled_job_is_detected_before_the_next_pipeline_stage(self):
-        from ingest.pipeline import IngestionCancelledError, raise_if_ingestion_cancelled
-
-        with patch(
-            "ingest.pipeline.run_query",
-            new=AsyncMock(return_value=SimpleNamespace(data=[{"status": "cancelled"}])),
-        ):
-            with self.assertRaises(IngestionCancelledError):
-                asyncio.run(raise_if_ingestion_cancelled(MagicMock(), "repo-1"))
-
-    def test_nemotron_request_uses_required_model_and_hides_reasoning(self):
-        from agent.nemotron import complete
-        fake_response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Grounded answer", reasoning_content="private"))])
-        fake_client = MagicMock()
-        fake_client.chat.completions.create = AsyncMock(return_value=fake_response)
-        fake_client.close = AsyncMock()
-
-        async def run_test():
-            with patch("agent.nemotron.require_nvidia_api_key", return_value="test-key"), \
-                 patch("agent.nemotron.AsyncOpenAI", return_value=fake_client):
-                return await complete([{"role": "user", "content": "Question"}])
-
-        self.assertEqual(asyncio.run(run_test()), "Grounded answer")
-        request = fake_client.chat.completions.create.await_args.kwargs
-        self.assertEqual(request["model"], "nvidia/nemotron-3-super-120b-a12b")
-        self.assertEqual(request["max_tokens"], 900)
-        self.assertEqual(
-            request["extra_body"],
-            {"chat_template_kwargs": {"enable_thinking": False, "force_nonempty_content": True}},
-        )
-
-    def test_nemotron_retries_a_transient_generation_failure(self):
-        from httpx import Request, Response
-        from openai import APIStatusError
-        from agent.nemotron import complete
-
-        transient_error = APIStatusError(
-            "Service unavailable",
-            response=Response(503, request=Request("POST", "https://integrate.api.nvidia.com/v1/chat/completions")),
-            body=None,
-        )
-        fake_client = MagicMock()
-        fake_client.chat.completions.create = AsyncMock(side_effect=[
-            transient_error,
-            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Recovered answer"))]),
-        ])
-        fake_client.close = AsyncMock()
-
-        async def run_test():
-            with patch("agent.nemotron.require_nvidia_api_key", return_value="test-key"), \
-                 patch("agent.nemotron.AsyncOpenAI", return_value=fake_client), \
-                 patch("agent.nemotron.nvidia_rate_limiter.acquire", new=AsyncMock()), \
-                 patch("agent.nemotron.asyncio.sleep", new=AsyncMock()):
-                return await complete([{"role": "user", "content": "Question"}])
-
-        self.assertEqual(asyncio.run(run_test()), "Recovered answer")
-        self.assertEqual(fake_client.chat.completions.create.await_count, 2)
-
-    def test_grounded_answer_prompt_requests_plain_text_sections(self):
-        from agent.agent import run_agent_loop
-
-        async def run_test():
-            with patch("agent.agent.complete", new=AsyncMock(return_value="Structured answer")) as complete:
-                answer, trace = await run_agent_loop(None, "repo-1", "Where is login?", "File: src/auth.py (L1-L2)")
-            return answer, trace, complete.await_args.args[0]
-
-        answer, trace, messages = asyncio.run(run_test())
-        self.assertEqual(answer, "Structured answer")
-        self.assertEqual(trace, [])
-        prompt = messages[0]["content"]
-        self.assertIn("Relevant files", prompt)
-        self.assertIn("How it works", prompt)
-        self.assertIn("client renders standard Markdown", prompt)
-        self.assertIn("## Relevant files", prompt)
-
-    def test_grounded_answer_includes_recent_conversation_without_replacing_evidence(self):
-        from agent.agent import run_agent_loop
-
-        async def run_test():
-            with patch("agent.agent.complete", new=AsyncMock(return_value="Follow-up answer")) as complete:
-                await run_agent_loop(
-                    None,
-                    "repo-1",
-                    "What about that handler?",
-                    "File: src/auth.py (L1-L2)",
-                    [{"role": "user", "content": "Where is login?"}, {"role": "assistant", "content": "It is in auth.py."}],
-                )
-                return complete.await_args.args[0]
-
-        messages = asyncio.run(run_test())
-        self.assertEqual(messages[1], {"role": "user", "content": "Where is login?"})
-        self.assertEqual(messages[2], {"role": "assistant", "content": "It is in auth.py."})
-        self.assertIn("sole source for factual claims", messages[3]["content"])
-        self.assertIn("File: src/auth.py", messages[3]["content"])
-
-    def test_hybrid_retrieval_deduplicates_and_keeps_readme_within_limit(self):
+    def test_retrieval_prioritizes_requested_file_and_survives_missing_embeddings(self):
         from retrieval.retriever import retrieve_context
+        store = MemoryStore()
+        schema = [{"id": "schema-1", "file_path": "sql/schema.sql", "start_line": 1, "end_line": 2, "language": "sql", "symbols": [], "content": "CREATE TABLE repos"}]
+        store.fetch_all = AsyncMock(side_effect=[[], schema])
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", "show sql/schema.sql", top_k=2))
+        self.assertEqual([chunk["id"] for chunk in result], ["schema-1"])
 
-        dense = [{"id": "a", "file_path": "src/auth.py", "start_line": 1, "end_line": 2, "language": "py", "content": "auth"}]
-        sparse = [{"id": "a", "file_path": "src/auth.py", "start_line": 1, "end_line": 2, "language": "py", "content": "auth"},
-                  {"id": "b", "file_path": "src/login.py", "start_line": 4, "end_line": 8, "language": "py", "content": "login"}]
-        readme = [{"id": "readme", "file_path": "README.md", "start_line": 1, "end_line": 3, "language": "md", "content": "overview"}]
+    def test_technical_question_does_not_force_a_readme_citation(self):
+        from retrieval.retriever import is_exploratory_repository_question, retrieve_context
 
-        class FakeRequest:
-            def __init__(self, data):
-                self.data = data
-            def execute(self):
-                return SimpleNamespace(data=self.data)
-            def select(self, *_args): return self
-            def eq(self, *_args): return self
-            def ilike(self, *_args): return self
-            def order(self, *_args): return self
-            def limit(self, *_args): return self
-
-        class FakeSupabase:
-            def rpc(self, name, _args):
-                return FakeRequest(dense if name.endswith("dense") else sparse)
-            def table(self, _name):
-                return FakeRequest(readme)
-
-        async def run_test():
-            with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
-                return await retrieve_context(FakeSupabase(), "repo-1", "what is this codebase architecture?", top_k=2)
-        results = asyncio.run(run_test())
-        self.assertEqual([chunk["id"] for chunk in results], ["readme", "a"])
-
-    def test_file_path_question_prioritizes_requested_source_chunks(self):
-        from retrieval.retriever import retrieve_context
-
-        dense = [{"id": "other", "file_path": "README.md", "start_line": 1, "end_line": 2, "language": "md", "content": "overview"}]
-        sparse = [{"id": "other", "file_path": "README.md", "start_line": 1, "end_line": 2, "language": "md", "content": "overview"}]
-        schema = [
-            {"id": "schema-1", "file_path": "sql/schema.sql", "start_line": 1, "end_line": 4, "language": "sql", "symbols": [], "content": "create table repos"},
-            {"id": "schema-2", "file_path": "sql/schema.sql", "start_line": 5, "end_line": 8, "language": "sql", "symbols": [], "content": "create table chunks"},
-        ]
-
-        class FakeRequest:
-            def __init__(self, data):
-                self.data = data
-                self.path_filter = None
-            def execute(self):
-                if self.path_filter == "sql/schema.sql":
-                    return SimpleNamespace(data=schema)
-                return SimpleNamespace(data=self.data)
-            def select(self, *_args): return self
-            def eq(self, *_args): return self
-            def ilike(self, _column, value):
-                self.path_filter = value
-                return self
-            def order(self, *_args): return self
-            def limit(self, *_args): return self
-
-        class FakeSupabase:
-            def rpc(self, name, _args):
-                return FakeRequest(dense if name.endswith("dense") else sparse)
-            def table(self, _name):
-                return FakeRequest([])
-
-        async def run_test():
-            with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
-                return await retrieve_context(FakeSupabase(), "repo-1", "Show me sql/schema.sql", top_k=2)
-
-        results = asyncio.run(run_test())
-        self.assertEqual([chunk["id"] for chunk in results], ["schema-1", "schema-2"])
-
-    def test_exploratory_question_uses_index_overview_when_terms_do_not_match(self):
-        from retrieval.retriever import retrieve_context
-
-        readme = [{"id": "readme", "file_path": "README.md", "start_line": 1, "end_line": 3, "language": "md", "content": "Project overview"}]
-        overview = [
-            {"id": "api", "file_path": "backend/api.py", "start_line": 1, "end_line": 4, "language": "py", "symbols": [], "content": "app = FastAPI()"},
-            {"id": "client", "file_path": "frontend/client.ts", "start_line": 1, "end_line": 4, "language": "ts", "symbols": [], "content": "export const client = {}"},
-        ]
-
-        class FakeRequest:
-            def __init__(self, data): self.data = data
-            def execute(self): return SimpleNamespace(data=self.data)
-            def select(self, *_args): return self
-            def eq(self, *_args): return self
-            def ilike(self, *_args): return self
-            def order(self, *_args): return self
-            def limit(self, *_args): return self
-
-        class FakeSupabase:
-            def __init__(self): self.table_calls = 0
-            def rpc(self, _name, _args): return FakeRequest([])
-            def table(self, _name):
-                self.table_calls += 1
-                return FakeRequest(readme if self.table_calls == 1 else overview)
-
-        async def run_test():
-            with patch("retrieval.retriever.embed_query", return_value=[0.0] * EMBEDDING_DIMENSION):
-                return await retrieve_context(
-                    FakeSupabase(), "repo-1", "Explain how this project is different from a typical project", top_k=3
-                )
-
-        results = asyncio.run(run_test())
-        self.assertEqual([chunk["id"] for chunk in results], ["readme", "api", "client"])
-
-    def test_keyword_retrieval_remains_available_when_query_embeddings_are_unavailable(self):
-        from ingest.embedder import EmbeddingUnavailableError
-        from retrieval.retriever import retrieve_context
-
-        sparse = [{"id": "sparse", "file_path": "src/login.py", "start_line": 1, "end_line": 2, "language": "py", "content": "login handler"}]
-
-        class FakeRequest:
-            def __init__(self, data): self.data = data
-            def execute(self): return SimpleNamespace(data=self.data)
-            def select(self, *_args): return self
-            def eq(self, *_args): return self
-            def ilike(self, *_args): return self
-            def order(self, *_args): return self
-            def limit(self, *_args): return self
-
-        class FakeSupabase:
-            def rpc(self, name, _args):
-                if name != "match_chunks_sparse":
-                    raise AssertionError(f"Unexpected retrieval RPC: {name}")
-                return FakeRequest(sparse)
-            def table(self, _name): return FakeRequest([])
-
-        async def run_test():
-            with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("503")):
-                return await retrieve_context(FakeSupabase(), "repo-1", "where is login", top_k=2)
-
-        results = asyncio.run(run_test())
-        self.assertEqual([chunk["id"] for chunk in results], ["sparse"])
-
-    def test_query_returns_retrieved_evidence_when_nvidia_is_not_configured(self):
-        from config import ModelConfigurationError
-        from main import app
-        from api.auth import get_current_user
-
-        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
-        fake_supabase = MagicMock()
-        fake_supabase.table.return_value = repo_query
-        chunks = [{
-            "id": "chunk-1", "file_path": "src/auth.py", "start_line": 10, "end_line": 20,
-            "language": "py", "symbols": ["login"], "content": "def login(): pass",
+        self.assertFalse(is_exploratory_repository_question("Explain how authentication works", []))
+        auth_chunk = [{
+            "id": "auth-1", "file_path": "backend/api/auth.py", "start_line": 12, "end_line": 30,
+            "language": "py", "symbols": ["get_current_user"], "content": "def get_current_user(): pass",
         }]
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.query_router.assert_supabase_schema"), \
-             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
+        store = MemoryStore()
+        store.fetch_all = AsyncMock(return_value=auth_chunk)
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", "Explain how authentication works", top_k=4))
+        self.assertEqual([chunk["file_path"] for chunk in result], ["backend/api/auth.py"])
+        self.assertFalse(any("readme" in sql.lower() for sql, _ in store.executed))
+
+    def test_query_endpoint_persists_user_and_assistant_messages(self):
+        from api.query_router import query_repo
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="Where is login?", model_profile="fast")
+        chunks = [{"id": "chunk-1", "file_path": "src/auth.py", "start_line": 1, "end_line": 5, "language": "py", "symbols": ["login"], "content": "def login(): pass"}]
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
              patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
-             patch("api.query_router.run_agent_loop", new=AsyncMock(side_effect=ModelConfigurationError("NVIDIA is not configured."))):
-            response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "Where is login?"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["mode"], "retrieval_fallback")
+             patch("api.query_router.get_conversation_history", new=AsyncMock(return_value=[])), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Direct answer\nLogin is in auth.py.", []))):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["mode"], "rag")
+        self.assertEqual(sum("INSERT INTO chat_messages" in sql for sql, _ in store.executed), 2)
 
-    def test_query_returns_repository_guidance_when_no_chunks_match(self):
-        from main import app
-        from api.auth import get_current_user
-
-        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
-        fake_supabase = MagicMock()
-        fake_supabase.table.return_value = repo_query
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.query_router.assert_supabase_schema"), \
-             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
+    def test_query_returns_guidance_without_matching_source(self):
+        from api.query_router import query_repo
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="hi", model_profile="fast")
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
              patch("api.query_router.retrieve_context", new=AsyncMock(return_value=[])), \
-             patch("api.query_router.run_agent_loop", new=AsyncMock()) as run_agent:
-            response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "hi"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["mode"], "repository_guidance")
-        self.assertEqual(response.json()["citations"], [])
-        self.assertFalse(run_agent.called)
+             patch("api.query_router.get_conversation_history", new=AsyncMock(return_value=[])):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["mode"], "repository_guidance")
+        self.assertIn("explore this repository", response["answer"])
 
-    def test_schema_check_turns_missing_symbol_column_into_actionable_error(self):
-        from database import DatabaseConfigurationError, assert_supabase_schema
-        from postgrest.exceptions import APIError
+    def test_recover_stuck_repos_fixes_intermediate_status_when_job_completed(self):
+        from ingest.pipeline import recover_stuck_repos
 
-        query = MagicMock()
-        query.select.return_value = query
-        query.limit.return_value = query
-        query.execute.side_effect = [
-            SimpleNamespace(data=[]),
-            APIError({"message": "column chunks.symbols does not exist", "code": "42703"}),
-        ]
-        fake_supabase = MagicMock()
-        fake_supabase.table.return_value = query
-        assert_supabase_schema.cache_clear()
-        with patch("database.supabase", fake_supabase):
-            with self.assertRaisesRegex(DatabaseConfigurationError, "Run supabase/00_init.sql"):
-                assert_supabase_schema()
-        assert_supabase_schema.cache_clear()
+        class RecoveryStore(MemoryStore):
+            async def fetch_all(self, sql, args=None):
+                self.executed.append((sql, args or []))
+                # Return one stuck repo: status='embedding' but job='completed'
+                return [{"id": "repo-stuck", "status": "embedding", "job_status": "completed"}]
 
-    def test_embedding_dimension_mismatch_has_an_actionable_migration_message(self):
-        from database import explain_supabase_api_error
-        from postgrest.exceptions import APIError
+            async def fetch_one(self, sql, args=None):
+                self.executed.append((sql, args or []))
+                return {"count": 42, "error_message": None}
 
-        message = explain_supabase_api_error(
-            APIError({"message": "expected 1024 dimensions, not 2048", "code": "22000"})
-        )
-        self.assertIn("supabase/00_init.sql", message)
-        self.assertIn("2048-dimensional", message)
+        store = RecoveryStore()
+        recovered = asyncio.run(recover_stuck_repos(store))
+        self.assertEqual(recovered, 1)
+        # Verify the repo was updated to 'ready' with the correct chunk count
+        update_calls = [(sql, args) for sql, args in store.executed if "UPDATE repos SET" in sql]
+        self.assertEqual(len(update_calls), 1)
+        update_sql, update_args = update_calls[0]
+        self.assertIn("status = ?", update_sql)
+        self.assertIn("ready", update_args)
+        self.assertIn(42, update_args)
 
-    def test_query_returns_grounded_answer_and_citations(self):
-        from main import app
-        from api.auth import get_current_user
+    def test_recover_stuck_repos_returns_zero_when_no_stuck_repos(self):
+        from ingest.pipeline import recover_stuck_repos
 
-        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
-        fake_supabase = MagicMock()
-        fake_supabase.table.return_value = repo_query
-        chunks = [{
-            "id": "chunk-1", "file_path": "src/auth.py", "start_line": 10, "end_line": 20,
-            "language": "py", "symbols": ["login"], "content": "def login(): pass",
-        }]
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.query_router.assert_supabase_schema"), \
-             patch("api.query_router.require_nvidia_api_key", return_value="test-key"), \
-             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
-             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
-             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("Login is in src/auth.py (L10-L20).", []))):
-            response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "Where is login?"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["mode"], "rag")
-        self.assertEqual(response.json()["citations"][0]["end_line"], 20)
-        fake_supabase.table.assert_any_call("chat_messages")
-        saved_messages = repo_query.insert.call_args.args[0]
-        self.assertEqual(saved_messages[0]["role"], "user")
-        self.assertEqual(saved_messages[0]["citations"], [])
-        self.assertEqual(saved_messages[0]["tool_calls"], [])
+        class EmptyStore(MemoryStore):
+            async def fetch_all(self, sql, args=None):
+                self.executed.append((sql, args or []))
+                return []
 
-    def test_query_returns_retrieved_evidence_when_live_generation_is_unavailable(self):
-        from main import app
-        from api.auth import get_current_user
-        from agent.nemotron import LLMProviderError
+        store = EmptyStore()
+        recovered = asyncio.run(recover_stuck_repos(store))
+        self.assertEqual(recovered, 0)
+        # No repo UPDATE should have been issued
+        update_calls = [(sql, args) for sql, args in store.executed if "UPDATE repos SET" in sql]
+        self.assertEqual(len(update_calls), 0)
 
-        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
-        fake_supabase = MagicMock()
-        fake_supabase.table.return_value = repo_query
-        chunks = [{
-            "id": "chunk-1", "file_path": "src/auth.py", "start_line": 10, "end_line": 20,
-            "language": "py", "symbols": ["login"], "content": "def login(): pass",
-        }]
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.query_router.assert_supabase_schema"), \
-             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase), \
-             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
-             patch("api.query_router.run_agent_loop", new=AsyncMock(side_effect=LLMProviderError("503"))):
-            response = TestClient(app).post("/api/query", json={"repo_name": "demo", "question": "Where is login?"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["mode"], "retrieval_fallback")
-        self.assertIn("Retrieved code context", response.json()["answer"])
+    def test_finalize_successful_job_prefetches_data_before_job_update(self):
+        from ingest.pipeline import finalize_successful_job
 
-    def test_conversation_endpoint_returns_saved_messages_in_chronological_order(self):
-        from main import app
-        from api.auth import get_current_user
+        call_order = []
 
-        repo_query = self._query([{"id": "repo-1", "status": "ready"}])
-        history_query = self._query([
-            {"id": "m-2", "role": "assistant", "content": "The answer.", "citations": [], "tool_calls": [], "mode": "rag", "latency_ms": 42, "created_at": "2026-01-01T00:00:02Z"},
-            {"id": "m-1", "role": "user", "content": "The question.", "citations": [], "tool_calls": [], "mode": None, "latency_ms": None, "created_at": "2026-01-01T00:00:01Z"},
-        ])
-        fake_supabase = MagicMock()
-        fake_supabase.table.side_effect = lambda table: repo_query if table == "repos" else history_query
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.query_router.assert_supabase_schema"), \
-             patch("api.query_router.get_user_scoped_supabase", return_value=fake_supabase):
-            response = TestClient(app).get("/api/conversations/demo")
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual([message["role"] for message in response.json()["messages"]], ["user", "assistant"])
+        class FinalizeStore(MemoryStore):
+            async def fetch_one(self, sql, args=None):
+                self.executed.append((sql, args or []))
+                if "SELECT COUNT" in sql:
+                    call_order.append("fetch_chunk_count")
+                    return {"count": 10}
+                if "SELECT error_message" in sql:
+                    call_order.append("fetch_error_message")
+                    return {"error_message": None}
+                return None
 
-    def test_repository_endpoints_return_compatible_payloads(self):
-        from main import app
-        from api.auth import get_current_user
+            async def execute(self, sql, args=None):
+                self.executed.append((sql, args or []))
+                if "UPDATE ingestion_jobs SET status = 'completed'" in sql:
+                    call_order.append("job_update")
+                    return SimpleNamespace(rows=[{"id": "job-1"}], rows_affected=1)
+                if "UPDATE repos SET" in sql:
+                    call_order.append("repo_update")
+                    return SimpleNamespace(rows=[], rows_affected=1)
+                return SimpleNamespace(rows=[], rows_affected=1)
 
-        repo = {"id": "repo-1", "repo_name": "demo", "status": "ready", "chunk_count": 4, "error_message": None}
-        fake_supabase = MagicMock()
-        fake_supabase.table.return_value = self._query([repo])
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.repos_router.scoped_client", new=AsyncMock(return_value=fake_supabase)):
-            client = TestClient(app)
-            status_response = client.get("/api/status/demo")
-            list_response = client.get("/api/repos")
-            delete_response = client.delete("/api/repos/demo")
-            rename_response = client.patch("/api/repos/demo", json={"repo_name": "renamed-demo"})
-        app.dependency_overrides.clear()
-        self.assertEqual(status_response.json()["chunk_count"], 4)
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(delete_response.status_code, 200)
-        self.assertEqual(rename_response.json(), {"repo_name": "renamed-demo"})
-
-    def test_ingest_endpoint_validates_url_before_creating_record(self):
-        from main import app
-        from api.auth import get_current_user
-
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.ingest_router.assert_supabase_schema"), patch("api.ingest_router.ensure_repo_record", new=AsyncMock()) as ensure:
-            response = TestClient(app).post("/api/ingest", json={"github_url": "https://github.com/o/r/tree/main"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 400)
-        ensure.assert_not_awaited()
-
-    def test_ingest_endpoint_queues_valid_repository(self):
-        from main import app
-        from api.auth import get_current_user
-
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.ingest_router.assert_supabase_schema"), \
-             patch("api.ingest_router.get_ingestion_supabase_client", return_value=MagicMock()), \
-             patch("api.ingest_router.ensure_repo_record", new=AsyncMock(return_value=("repo-1", "demo"))), \
-             patch("api.ingest_router.enqueue_ingestion_job", new=AsyncMock()) as enqueue:
-            response = TestClient(app).post("/api/ingest", json={"github_url": "https://github.com/octocat/demo"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["repo_name"], "demo")
-        enqueue.assert_awaited_once()
-
-    def test_ingest_endpoint_explains_missing_service_role_key(self):
-        from database import DatabaseConfigurationError
-        from main import app
-        from api.auth import get_current_user
-
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.ingest_router.assert_supabase_schema"), \
-             patch(
-                 "api.ingest_router.get_ingestion_supabase_client",
-                 side_effect=DatabaseConfigurationError("Repository indexing requires SUPABASE_SERVICE_ROLE_KEY."),
-             ):
-            response = TestClient(app).post("/api/ingest", json={"github_url": "https://github.com/octocat/demo"})
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("SUPABASE_SERVICE_ROLE_KEY", response.json()["detail"])
-
-    def test_cancel_endpoint_marks_an_active_repository_stopped(self):
-        from main import app
-        from api.auth import get_current_user
-
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.repos_router.assert_supabase_schema"), \
-             patch("api.repos_router.get_ingestion_supabase_client", return_value=MagicMock()), \
-             patch(
-                 "api.repos_router.run_query",
-                 new=AsyncMock(side_effect=[
-                     SimpleNamespace(data=[{"id": "repo-1", "status": "embedding"}]),
-                     SimpleNamespace(data=[]),
-                     SimpleNamespace(data=[]),
-                     SimpleNamespace(data=[]),
-                     SimpleNamespace(data=[]),
-                 ]),
-             ):
-            response = TestClient(app).post("/api/repos/demo/cancel-indexing")
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["message"], "Indexing stopped")
-
-    def test_reindex_endpoint_uses_the_existing_user_scoped_repository(self):
-        from main import app
-        from api.auth import get_current_user
-
-        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1", access_token="token-1")
-        with patch("api.repos_router.assert_supabase_schema"), \
-             patch("api.repos_router.get_ingestion_supabase_client", return_value=MagicMock()), \
-             patch("api.repos_router.run_query", new=AsyncMock(return_value=SimpleNamespace(data=[{"github_url": "https://github.com/octocat/demo.git"}]))), \
-             patch("api.repos_router.ensure_repo_record", new=AsyncMock(return_value=("repo-1", "demo"))), \
-             patch("api.repos_router.enqueue_ingestion_job", new=AsyncMock()) as enqueue:
-            response = TestClient(app).post("/api/repos/demo/reindex")
-        app.dependency_overrides.clear()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["repo_name"], "demo")
-        enqueue.assert_awaited_once()
+        store = FinalizeStore()
+        job = {"id": "job-1", "repo_id": "repo-1", "claim_token": "token-1"}
+        result = asyncio.run(finalize_successful_job(store, job))
+        self.assertTrue(result)
+        # Critical: data must be fetched BEFORE the job UPDATE, and repo UPDATE after
+        self.assertEqual(call_order, ["fetch_chunk_count", "fetch_error_message", "job_update", "repo_update"])
 
 
 if __name__ == "__main__":

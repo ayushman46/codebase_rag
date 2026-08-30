@@ -1,17 +1,27 @@
-import base64
+"""Database boundaries for Supabase Auth and Turso application data.
+
+Supabase remains the identity provider. Repository records, indexing jobs,
+source chunks, vector embeddings, metadata, and conversations live in Turso.
+"""
+
+import asyncio
 import json
 import logging
+import random
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Any, Iterable
 
-from postgrest.exceptions import APIError
+import libsql
 from supabase import create_client
+
 from config import settings
 
 logger = logging.getLogger(__name__)
 
+
 class DatabaseConfigurationError(RuntimeError):
-    pass
+    """Raised when a required database service is unavailable or unconfigured."""
 
 
 class DeferredSupabaseClient:
@@ -22,118 +32,224 @@ class DeferredSupabaseClient:
         raise DatabaseConfigurationError(self.message)
 
 
-def looks_like_service_role_key(key: str) -> bool:
-    try:
-        payload = decode_jwt_payload(key)
-        return payload.get("role") == "service_role"
-    except Exception:
-        return False
-
-
-def decode_jwt_payload(token: str) -> dict:
-    parts = token.split(".")
-    if len(parts) < 2:
-        return {}
-
-    payload = parts[1]
-    padding = "=" * (-len(payload) % 4)
-    decoded = base64.urlsafe_b64decode(payload + padding)
-    return json.loads(decoded.decode("utf-8"))
-
-
 def get_supabase_client():
-    return build_supabase_client()
-
-
-def get_ingestion_supabase_client():
-    """Return the server client required to write and process durable ingestion jobs."""
-    if not settings.supabase_service_role_key:
-        raise DatabaseConfigurationError(
-            "Repository indexing requires SUPABASE_SERVICE_ROLE_KEY in the backend environment. "
-            "Add the service_role key in Render, then redeploy the backend."
-        )
-    return build_supabase_client()
-
-
-def build_supabase_client(access_token: Optional[str] = None):
-    url = settings.supabase_url
-    key = settings.supabase_service_role_key or settings.supabase_key
+    """Return the public-key client used exclusively to validate user sessions."""
+    url = settings.supabase_url.strip()
+    key = settings.supabase_key.strip()
     message = (
-        "Supabase is not configured correctly. Set SUPABASE_URL and a backend key "
-        "(preferably SUPABASE_SERVICE_ROLE_KEY) in the project root .env file before starting the backend."
+        "Supabase authentication is not configured. Set SUPABASE_URL and SUPABASE_KEY "
+        "in the backend environment, then restart the service."
     )
-    
-    # Check for empty or placeholder values
-    if not url or not key or "your_supabase_url_here" in url or "your_supabase_anon_key_here" in key:
-        logger.warning("Supabase configuration is incomplete")
+    if not url or not key or "your_supabase" in url or "your_supabase" in key:
         return DeferredSupabaseClient(message)
-        
     try:
-        if not settings.supabase_service_role_key and not looks_like_service_role_key(key):
-            logger.warning("Backend is not using a Supabase service role key; writes may be blocked by RLS")
-        client = create_client(url, key)
-        if access_token and not settings.supabase_service_role_key:
-            client.postgrest.auth(access_token)
-        return client
+        return create_client(url, key)
     except Exception:
-        logger.exception("Failed to initialize Supabase client")
+        logger.exception("Could not initialize the Supabase authentication client")
         return DeferredSupabaseClient(message)
+
 
 supabase = get_supabase_client()
 
+JSON_COLUMNS = {"symbols", "citations", "tool_calls", "tech_stack", "file_summaries"}
+
+
+@dataclass(frozen=True)
+class Statement:
+    sql: str
+    args: list[Any]
+
+
+@dataclass
+class QueryResult:
+    rows: list[dict[str, Any]]
+    rows_affected: int
+
+
+class TursoStore:
+    """Small asynchronous, parameterized data-access layer for Turso.
+
+    This is a server-only client. Ownership is enforced by including the
+    authenticated user id in each repository and conversation query.
+    """
+
+    def __init__(self, url: str, auth_token: str):
+        self._client = libsql.connect(database=url, auth_token=auth_token, _check_same_thread=False)
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _row_to_dict(columns: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
+        value = dict(zip(columns, row, strict=True))
+        for column in JSON_COLUMNS:
+            raw = value.get(column)
+            if isinstance(raw, str):
+                try:
+                    value[column] = json.loads(raw)
+                except json.JSONDecodeError:
+                    value[column] = [] if column in {"symbols", "citations", "tool_calls", "tech_stack"} else {}
+        return value
+
+    async def execute(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None):
+        """Execute one parameterized statement.
+
+        Read statements are safe to retry when a remote database connection has
+        a short-lived failure. Writes intentionally are *not* retried here: a
+        connection can fail after a successful commit, and retrying a generic
+        write can create a duplicate side effect. Idempotent write paths use a
+        caller-supplied primary key or an upsert instead.
+        """
+        arguments = list(args or [])
+        attempts = 3 if self._is_read_statement(sql) else 1
+        for attempt in range(attempts):
+            try:
+                async with self._lock:
+                    return await asyncio.to_thread(self._execute_sync, sql, arguments)
+            except Exception as error:
+                if attempt == attempts - 1 or not self._is_transient_error(error):
+                    raise
+                await asyncio.sleep(self._retry_delay(attempt))
+
+        raise RuntimeError("Turso retry loop ended unexpectedly.")  # pragma: no cover
+
+    @staticmethod
+    def _is_read_statement(sql: str) -> bool:
+        return sql.lstrip().upper().startswith(("SELECT", "EXPLAIN", "PRAGMA"))
+
+    @staticmethod
+    def _is_transient_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return any(marker in message for marker in (
+            "database is locked", "database is busy", "busy", "timeout", "timed out",
+            "connection", "temporarily unavailable", "http 429", "http 500", "http 502",
+            "http 503", "http 504",
+        ))
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        return min(1.5, 0.15 * (2 ** attempt)) + random.uniform(0, 0.1)
+
+    def _execute_sync(self, sql: str, args: list[Any]) -> QueryResult:
+        cursor = self._client.execute(sql, args)
+        columns = [item[0] for item in cursor.description] if cursor.description else []
+        rows = [self._row_to_dict(columns, row) for row in cursor.fetchall()] if columns else []
+        affected = cursor.rowcount if cursor.rowcount >= 0 else len(rows)
+        self._client.commit()
+        return QueryResult(rows=rows, rows_affected=affected)
+
+    async def batch(self, statements: Iterable[Statement]) -> None:
+        """Run an idempotent batch with bounded recovery for transient outages.
+
+        This method is intentionally used only for chunk insertion. Each chunk
+        carries a UUID and uses ``INSERT OR IGNORE``, so a retry after an
+        ambiguous network failure cannot duplicate a chunk.
+        """
+        statements = list(statements)
+        if not statements:
+            return
+        grouped: dict[str, list[list[Any]]] = {}
+        for statement in statements:
+            grouped.setdefault(statement.sql, []).append(statement.args)
+        for attempt in range(3):
+            try:
+                async with self._lock:
+                    await asyncio.to_thread(self._batch_sync, grouped)
+                return
+            except Exception as error:
+                if attempt == 2 or not self._is_transient_error(error):
+                    raise
+                await asyncio.sleep(self._retry_delay(attempt))
+
+    def _batch_sync(self, grouped: dict[str, list[list[Any]]]) -> None:
+        for sql, argument_sets in grouped.items():
+            self._client.executemany(sql, argument_sets)
+        self._client.commit()
+
+    async def fetch_all(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
+        return (await self.execute(sql, args)).rows
+
+    async def fetch_one(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None) -> dict[str, Any] | None:
+        rows = await self.fetch_all(sql, args)
+        return rows[0] if rows else None
+
+    async def insert_chunks(self, chunks: list[dict[str, Any]]) -> None:
+        """Insert a bounded chunk batch and encode vectors in Turso natively."""
+        with_embeddings: list[Statement] = []
+        without_embeddings: list[Statement] = []
+        vector_sql = (
+            "INSERT OR IGNORE INTO chunks (id, repo_id, file_path, start_line, end_line, language, symbols, content, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, vector32(?))"
+        )
+        plain_sql = (
+            "INSERT OR IGNORE INTO chunks (id, repo_id, file_path, start_line, end_line, language, symbols, content, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)"
+        )
+        for chunk in chunks:
+            values = [
+                chunk["id"], chunk["repo_id"], chunk["file_path"], chunk["start_line"],
+                chunk["end_line"], chunk["language"], json.dumps(chunk.get("symbols") or []), chunk["content"],
+            ]
+            if chunk.get("embedding") is None:
+                without_embeddings.append(Statement(plain_sql, values))
+            else:
+                with_embeddings.append(Statement(vector_sql, values + [json.dumps(chunk["embedding"])]))
+        await self.batch(with_embeddings + without_embeddings)
+
+    async def close(self) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._client.close)
+
 
 @lru_cache(maxsize=1)
-def assert_supabase_schema():
-    try:
-        supabase.table("repos").select("id").limit(1).execute()
-        supabase.table("chunks").select("symbols").limit(1).execute()
-        supabase.table("ingestion_jobs").select("id").limit(1).execute()
-        supabase.table("chat_messages").select("id").limit(1).execute()
-    except DatabaseConfigurationError:
-        raise
-    except APIError as e:
-        if (
-            getattr(e, "code", "") in {"PGRST204", "PGRST205", "42703"}
-            or "schema cache" in str(e).lower()
-            or "does not exist" in str(e).lower()
-        ):
-            raise DatabaseConfigurationError(
-                "Supabase schema is not initialized. Run supabase/00_init.sql in the Supabase SQL editor, "
-                "then restart the backend."
-            ) from e
+def get_turso_store() -> TursoStore:
+    url = settings.turso_database_url.strip()
+    token = settings.turso_auth_token.strip()
+    if not url or not token:
         raise DatabaseConfigurationError(
-            "Supabase schema could not be verified. Check the Supabase configuration and retry."
-        ) from e
-    except Exception as e:
-        raise DatabaseConfigurationError(
-            "Supabase is currently unavailable. Check the connection configuration and retry."
-        ) from e
-
-
-def explain_supabase_api_error(error: Exception) -> str:
-    if isinstance(error, APIError):
-        message = str(error)
-        normalized_message = message.lower()
-        if "dimensions" in normalized_message and "expected" in normalized_message:
-            return (
-                "Your Supabase database embedding dimension is incompatible with this application's NVIDIA "
-                "2048-dimensional embeddings. Run the current supabase/00_init.sql in the Supabase SQL Editor once, "
-                "then submit this repository again. Existing code chunks will be rebuilt during re-indexing."
-            )
-        if "row-level security" in normalized_message:
-            return (
-                "Supabase denied the write because the backend is not using a service role key. "
-                "Set SUPABASE_SERVICE_ROLE_KEY in /Users/ayush/Downloads/codebase_rag/.env "
-                "to your Supabase service_role key, then restart the backend."
-            )
-    return str(error)
-
-
-def get_user_scoped_supabase(access_token: Optional[str]):
-    if settings.supabase_service_role_key:
-        return build_supabase_client()
-    if not access_token:
-        raise DatabaseConfigurationError(
-            "No Supabase access token was available for this request. Sign in again and retry."
+            "Turso is not configured. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the backend environment."
         )
-    return build_supabase_client(access_token=access_token)
+    try:
+        return TursoStore(url, token)
+    except Exception as error:
+        raise DatabaseConfigurationError("Could not initialize the Turso database client.") from error
+
+
+_turso_schema_verified = False
+_turso_schema_lock = asyncio.Lock()
+
+
+async def assert_turso_schema() -> None:
+    """Fail early with a migration instruction instead of leaving requests hanging."""
+    global _turso_schema_verified
+    if _turso_schema_verified:
+        return
+    async with _turso_schema_lock:
+        if _turso_schema_verified:
+            return
+        try:
+            store = get_turso_store()
+            for table in ("repos", "chunks", "ingestion_jobs", "chat_messages", "kt_cache"):
+                await store.execute(f"SELECT 1 FROM {table} LIMIT 1")
+        except DatabaseConfigurationError:
+            raise
+        except Exception as error:
+            raise DatabaseConfigurationError(
+                "Turso schema is not initialized or is unavailable. Run turso/00_init.sql in the Turso SQL shell, "
+                "then restart the backend."
+            ) from error
+        _turso_schema_verified = True
+
+
+def explain_database_error(error: Exception) -> str:
+    """Return safe, actionable messages without exposing database credentials or SQL."""
+    message = str(error).lower()
+    if "no such table" in message or "does not exist" in message:
+        return "Turso schema is not initialized. Run turso/00_init.sql, then restart the backend."
+    if "vector" in message and ("dimension" in message or "length" in message):
+        return (
+            "The configured embedding dimension does not match the Turso schema. "
+            "Set EMBEDDING_DIMENSION=2048 and run the current turso/00_init.sql."
+        )
+    if "unauthorized" in message or "auth" in message or "token" in message:
+        return "Turso rejected the database credential. Replace TURSO_AUTH_TOKEN and restart the backend."
+    logger.error("Unhandled Turso database error: %s", type(error).__name__)
+    return "The database could not complete that request. Please try again shortly."

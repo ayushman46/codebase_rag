@@ -1,5 +1,5 @@
 import { Menu } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import useStore from '../store/useStore';
 import GoogleSignInButton from './GoogleSignInButton';
@@ -12,6 +12,19 @@ const SiteHeader = ({ onOpenRepos }) => {
   const { user } = useStore();
   const displayName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Account';
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mobileMenuButtonRef = useRef(null);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setMobileMenuOpen(false);
+        mobileMenuButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [mobileMenuOpen]);
 
   return (
     <header className="sticky top-0 z-40 border-b border-sand/80 bg-warm-canvas/95 backdrop-blur">
@@ -22,7 +35,7 @@ const SiteHeader = ({ onOpenRepos }) => {
 
         <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-10 md:flex">
           {user && onOpenRepos && (
-            <button onClick={onOpenRepos} className="text-[15px] font-medium text-warm-gray transition-colors hover:text-ink-black">Codebases</button>
+            <button onClick={onOpenRepos} className="min-h-11 text-[15px] font-medium text-warm-gray transition-colors hover:text-ink-black">Codebases</button>
           )}
           <NavLink to="/platform" className={navClass}>Platform</NavLink>
           <NavLink to="/pricing" className={navClass}>Pricing</NavLink>
@@ -30,7 +43,7 @@ const SiteHeader = ({ onOpenRepos }) => {
         </div>
 
         <div className="ml-auto flex shrink-0 items-center gap-3">
-          <button onClick={() => setMobileMenuOpen((open) => !open)} className="p-1 text-warm-gray transition hover:text-ink-black md:hidden" aria-label="Toggle navigation" aria-expanded={mobileMenuOpen}><Menu className="h-5 w-5" /></button>
+          <button ref={mobileMenuButtonRef} onClick={() => setMobileMenuOpen((open) => !open)} className="flex h-11 w-11 items-center justify-center text-warm-gray transition hover:text-ink-black md:hidden" aria-label="Toggle navigation" aria-expanded={mobileMenuOpen}><Menu className="h-5 w-5" /></button>
           {user ? (
             <Link to="/account" className="flex h-9 w-9 items-center justify-center rounded-full transition-opacity hover:opacity-75" aria-label="Open account">
               {user.user_metadata?.avatar_url ? (
@@ -49,7 +62,7 @@ const SiteHeader = ({ onOpenRepos }) => {
       {mobileMenuOpen && (
         <div className="absolute inset-x-0 top-full z-30 border-b border-sand bg-warm-canvas py-4 md:hidden">
           <div className="content-shell flex flex-col gap-5 text-[15px] font-medium">
-            {user && onOpenRepos && <button onClick={() => { setMobileMenuOpen(false); onOpenRepos(); }} className="text-left text-charcoal">Codebases</button>}
+            {user && onOpenRepos && <button onClick={() => { setMobileMenuOpen(false); onOpenRepos(); }} className="min-h-11 text-left text-charcoal">Codebases</button>}
             <NavLink onClick={() => setMobileMenuOpen(false)} to="/platform" className={navClass}>Platform</NavLink>
             <NavLink onClick={() => setMobileMenuOpen(false)} to="/pricing" className={navClass}>Pricing</NavLink>
             <NavLink onClick={() => setMobileMenuOpen(false)} to="/docs" className={navClass}>Docs</NavLink>

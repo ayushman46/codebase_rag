@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import RequireAuth from './components/RequireAuth';
 import SiteHeader from './components/SiteHeader';
 import { supabase } from './api/supabase';
+import { isIngestionActive } from './components/IngestionProgress';
 import useStore from './store/useStore';
 
 const AccountPage = lazy(() => import('./pages/AccountPage'));
@@ -52,7 +53,7 @@ function App() {
     if (!user) return undefined;
     const interval = setInterval(() => {
       repos.forEach((repo) => {
-        if (repo.status !== 'ready' && repo.status !== 'failed') pollStatus(repo.repo_name);
+        if (isIngestionActive(repo.status)) pollStatus(repo.repo_name);
       });
     }, 5000);
     return () => clearInterval(interval);

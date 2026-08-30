@@ -1,27 +1,39 @@
-"""Local and self-hosted runner for the durable Supabase ingestion queue."""
+"""Local and self-hosted runner for the durable Turso ingestion queue."""
 
 import asyncio
 import logging
 
 from config import settings
-from database import assert_supabase_schema, get_supabase_client
-from ingest.pipeline import process_one_queued_ingestion
+from database import assert_turso_schema, get_turso_store
+from ingest.pipeline import process_one_queued_ingestion, recover_stuck_repos
 
 logger = logging.getLogger(__name__)
+
+# Run the recovery sweep every N poll cycles to catch any repos that were
+# left in an intermediate state by a prior crash. One sweep per ~30 seconds
+# is sufficient; the condition is rare and cheap.
+_RECOVERY_SWEEP_INTERVAL = 10
 
 
 async def process_queue_forever():
     """Claim one queued job at a time without blocking FastAPI request handling."""
     logger.info("Local ingestion worker started; polling every %s seconds", settings.local_ingestion_poll_seconds)
+    poll_count = 0
 
     while True:
         try:
-            # The schema check is cached after its first success. Run the first
-            # network-bound call in a worker thread so it cannot block the API.
-            await asyncio.to_thread(assert_supabase_schema)
-            result = await process_one_queued_ingestion(get_supabase_client())
+            # The schema check is cached after its first successful Turso call.
+            await assert_turso_schema()
+            # Periodically sweep for repos stuck in an intermediate status whose
+            # ingestion job was already marked completed by a crashed worker.
+            poll_count += 1
+            if poll_count == 1 or poll_count % _RECOVERY_SWEEP_INTERVAL == 0:
+                recovered = await recover_stuck_repos(get_turso_store())
+                if recovered:
+                    logger.info("Recovery sweep restored %d stuck repository(ies)", recovered)
+            result = await process_one_queued_ingestion(get_turso_store())
             # Continue immediately while work is available; otherwise avoid
-            # repeatedly querying Supabase when the queue is empty.
+            # repeatedly querying Turso when the queue is empty.
             delay = 0 if result.get("processed") else settings.local_ingestion_poll_seconds
         except asyncio.CancelledError:
             logger.info("Local ingestion worker stopped")

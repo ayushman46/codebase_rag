@@ -1,6 +1,6 @@
 """Deterministic repository metadata cache; it never blocks ingestion on an LLM."""
 
-import asyncio
+import json
 from collections import Counter, defaultdict
 from pathlib import PurePosixPath
 from typing import Dict, List
@@ -12,7 +12,7 @@ LANGUAGE_NAMES = {
 }
 
 
-async def build_kt_cache(supabase_client, repo_id: str, chunks: List[Dict]):
+async def build_kt_cache(store, repo_id: str, chunks: List[Dict]):
     """Persist factual file/language metadata without model calls or invented summaries."""
     files: dict[str, list[Dict]] = defaultdict(list)
     for chunk in chunks:
@@ -39,10 +39,16 @@ async def build_kt_cache(supabase_client, repo_id: str, chunks: List[Dict]):
         f"Most represented directories: {', '.join(directory for directory, _ in top_directories.most_common(8)) or 'root'} . "
         "Ask a repository question to retrieve source-backed, line-level evidence."
     )
-    payload = {
-        "repo_id": repo_id,
-        "tech_stack": tech_stack,
-        "onboarding_manual": onboarding_manual,
-        "file_summaries": file_summaries,
-    }
-    await asyncio.to_thread(lambda: supabase_client.table("kt_cache").upsert(payload, on_conflict="repo_id").execute())
+    await store.execute(
+        "INSERT INTO kt_cache (repo_id, tech_stack, onboarding_manual, file_summaries, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET tech_stack = excluded.tech_stack, "
+        "onboarding_manual = excluded.onboarding_manual, file_summaries = excluded.file_summaries, "
+        "updated_at = excluded.updated_at",
+        [repo_id, json.dumps(tech_stack), onboarding_manual, json.dumps(file_summaries), _timestamp()],
+    )
+
+
+def _timestamp() -> str:
+    from datetime import UTC, datetime
+    return datetime.now(UTC).isoformat()

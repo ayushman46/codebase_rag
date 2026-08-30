@@ -1,18 +1,14 @@
-import asyncio
+"""Owned repository management backed by Turso."""
+
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
-from database import (
-    DatabaseConfigurationError,
-    assert_supabase_schema,
-    get_ingestion_supabase_client,
-    get_user_scoped_supabase,
-    explain_supabase_api_error,
-)
-from ingest.pipeline import IngestionConflictError, enqueue_ingestion_job, ensure_repo_record
+from database import DatabaseConfigurationError, assert_turso_schema, explain_database_error, get_turso_store
+from ingest.pipeline import ACTIVE_REPOSITORY_STATUSES, IngestionConflictError, enqueue_ingestion_job, enforce_ingestion_capacity, ensure_repo_record
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -22,122 +18,116 @@ class RenameRepositoryRequest(BaseModel):
     repo_name: str = Field(min_length=1, max_length=200)
 
 
-async def run_query(query):
-    return await asyncio.to_thread(query.execute)
+def now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
-async def scoped_client(access_token: str):
-    try:
-        assert_supabase_schema()
-        return get_user_scoped_supabase(access_token)
-    except DatabaseConfigurationError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+async def owned_repo(store, user_id: str, repo_name: str):
+    repo = await store.fetch_one(
+        "SELECT id, repo_name, github_url, status, chunk_count, error_message, created_at "
+        "FROM repos WHERE user_id = ? AND repo_name = ?",
+        [user_id, repo_name],
+    )
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+    return repo
 
 
 @router.get("/status/{repo_name}")
 async def get_status(repo_name: str, current_user=Depends(get_current_user)):
-    supabase_client = await scoped_client(current_user.access_token)
     try:
-        res = await run_query(
-            supabase_client.table("repos").select("status, chunk_count, error_message")
-            .eq("repo_name", repo_name).eq("user_id", current_user.id)
-        )
+        await assert_turso_schema()
+        repo = await owned_repo(get_turso_store(), current_user.id, repo_name)
+        return {key: repo[key] for key in ("status", "chunk_count", "error_message")}
+    except HTTPException:
+        raise
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         logger.exception("Could not fetch repository status")
-        raise HTTPException(status_code=502, detail="Could not fetch repository status.") from error
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Repository not found.")
-    return res.data[0]
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
 
 
 @router.get("/repos")
 async def list_repos(current_user=Depends(get_current_user)):
-    supabase_client = await scoped_client(current_user.access_token)
     try:
-        res = await run_query(
-            supabase_client.table("repos")
-            .select("id, repo_name, github_url, status, chunk_count, created_at, error_message")
-            .eq("user_id", current_user.id).order("created_at", desc=True)
+        await assert_turso_schema()
+        return await get_turso_store().fetch_all(
+            "SELECT id, repo_name, github_url, status, chunk_count, created_at, error_message "
+            "FROM repos WHERE user_id = ? ORDER BY created_at DESC",
+            [current_user.id],
         )
-        return res.data
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         logger.exception("Could not list repositories")
-        raise HTTPException(status_code=502, detail="Could not list repositories.") from error
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
 
 
 @router.delete("/repos/{repo_name}")
 async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
-    supabase_client = await scoped_client(current_user.access_token)
     try:
-        existing = await run_query(
-            supabase_client.table("repos").select("id, status").eq("repo_name", repo_name).eq("user_id", current_user.id)
-        )
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Repository not found.")
-        if existing.data[0]["status"] in {"queued", "cloning", "chunking", "embedding", "summarizing"}:
+        await assert_turso_schema()
+        store = get_turso_store()
+        repo = await owned_repo(store, current_user.id, repo_name)
+        if repo["status"] in ACTIVE_REPOSITORY_STATUSES:
             raise HTTPException(status_code=409, detail="Stop indexing before deleting this repository.")
-        await run_query(
-            supabase_client.table("repos").delete().eq("repo_name", repo_name).eq("user_id", current_user.id)
-        )
+        # Explicit deletes make cleanup reliable even if a Turso connection was
+        # created without SQLite's per-connection foreign-key pragma.
+        for table in ("chat_messages", "ingestion_jobs", "kt_cache", "chunks"):
+            await store.execute(f"DELETE FROM {table} WHERE repo_id = ?", [repo["id"]])
+        await store.execute("DELETE FROM repos WHERE id = ? AND user_id = ?", [repo["id"], current_user.id])
     except HTTPException:
         raise
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         logger.exception("Could not delete repository")
-        raise HTTPException(status_code=502, detail="Could not delete repository.") from error
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
     return {"message": f"Repository {repo_name} deleted successfully"}
 
 
 @router.patch("/repos/{repo_name}")
-async def rename_repo(
-    repo_name: str,
-    payload: RenameRepositoryRequest,
-    current_user=Depends(get_current_user),
-):
-    """Rename one of the signed-in user's repository workspaces."""
+async def rename_repo(repo_name: str, payload: RenameRepositoryRequest, current_user=Depends(get_current_user)):
     new_name = " ".join(payload.repo_name.split())
     if not new_name:
         raise HTTPException(status_code=422, detail="Repository name must contain visible text.")
+    if any(character in new_name for character in ("/", "\\", "\x00")):
+        raise HTTPException(status_code=422, detail="Repository names cannot contain path separators.")
     if new_name == repo_name:
         return {"repo_name": new_name}
-
-    supabase_client = await scoped_client(current_user.access_token)
     try:
-        existing = await run_query(
-            supabase_client.table("repos").select("id")
-            .eq("repo_name", repo_name).eq("user_id", current_user.id).limit(1)
+        await assert_turso_schema()
+        store = get_turso_store()
+        repo = await owned_repo(store, current_user.id, repo_name)
+        duplicate = await store.fetch_one(
+            "SELECT id FROM repos WHERE user_id = ? AND repo_name = ?", [current_user.id, new_name]
         )
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Repository not found.")
-        await run_query(
-            supabase_client.table("repos").update({"repo_name": new_name})
-            .eq("id", existing.data[0]["id"]).eq("user_id", current_user.id)
+        if duplicate:
+            raise HTTPException(status_code=409, detail="You already have a repository with that name.")
+        await store.execute(
+            "UPDATE repos SET repo_name = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            [new_name, now(), repo["id"], current_user.id],
         )
     except HTTPException:
         raise
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
-        if getattr(error, "code", None) == "23505" or "duplicate key" in str(error).lower():
-            raise HTTPException(status_code=409, detail="You already have a repository with that name.") from error
         logger.exception("Could not rename repository")
-        raise HTTPException(status_code=502, detail="Could not rename repository.") from error
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
     return {"repo_name": new_name}
 
 
 @router.post("/repos/{repo_name}/reindex")
 async def reindex_repository(repo_name: str, current_user=Depends(get_current_user)):
-    """Requeue an existing repository without relying on frontend URL state."""
     try:
-        assert_supabase_schema()
-        supabase_client = get_ingestion_supabase_client()
-        existing = await run_query(
-            supabase_client.table("repos").select("github_url")
-            .eq("repo_name", repo_name).eq("user_id", current_user.id).limit(1)
-        )
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Repository not found.")
-        repo_id, normalized_name = await ensure_repo_record(
-            supabase_client, existing.data[0]["github_url"], current_user.id
-        )
-        await enqueue_ingestion_job(supabase_client, existing.data[0]["github_url"], current_user.id, repo_id)
+        await assert_turso_schema()
+        store = get_turso_store()
+        existing = await owned_repo(store, current_user.id, repo_name)
+        await enforce_ingestion_capacity(store, current_user.id, existing["github_url"])
+        repo_id, normalized_name = await ensure_repo_record(store, existing["github_url"], current_user.id)
+        await enqueue_ingestion_job(store, existing["github_url"], current_user.id, repo_id)
     except HTTPException:
         raise
     except IngestionConflictError as error:
@@ -146,37 +136,32 @@ async def reindex_repository(repo_name: str, current_user=Depends(get_current_us
         raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         logger.exception("Could not re-index repository")
-        raise HTTPException(status_code=502, detail=explain_supabase_api_error(error)) from error
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
     return {"message": "Repository queued for re-indexing", "repo_name": normalized_name}
 
 
 @router.post("/repos/{repo_name}/cancel-indexing")
 async def cancel_indexing(repo_name: str, current_user=Depends(get_current_user)):
     try:
-        assert_supabase_schema()
-        supabase_client = get_ingestion_supabase_client()
-        existing = await run_query(
-            supabase_client.table("repos").select("id, status")
-            .eq("repo_name", repo_name).eq("user_id", current_user.id).limit(1)
-        )
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Repository not found.")
-        repo = existing.data[0]
-        if repo["status"] not in {"queued", "cloning", "chunking", "embedding", "summarizing"}:
+        await assert_turso_schema()
+        store = get_turso_store()
+        repo = await owned_repo(store, current_user.id, repo_name)
+        if repo["status"] not in ACTIVE_REPOSITORY_STATUSES:
             raise HTTPException(status_code=409, detail="This repository is not currently being indexed.")
-
-        await run_query(
-            supabase_client.table("ingestion_jobs").update({
-                "status": "cancelled", "finished_at": None, "claimed_at": None,
-                "last_error": "Indexing stopped by the user.",
-            }).eq("repo_id", repo["id"])
+        cancelled = await store.execute(
+            "UPDATE ingestion_jobs SET status = 'cancelled', claimed_at = NULL, heartbeat_at = NULL, claim_token = NULL, "
+            "last_error = 'Indexing stopped by the user.', updated_at = ? "
+            "WHERE repo_id = ? AND status IN ('queued', 'processing') RETURNING id",
+            [now(), repo["id"]],
         )
-        await run_query(supabase_client.table("chunks").delete().eq("repo_id", repo["id"]))
-        await run_query(supabase_client.table("kt_cache").delete().eq("repo_id", repo["id"]))
-        await run_query(
-            supabase_client.table("repos").update({
-                "status": "cancelled", "chunk_count": 0, "error_message": "Indexing stopped by you.",
-            }).eq("id", repo["id"])
+        if not cancelled.rows:
+            raise HTTPException(status_code=409, detail="This repository finished indexing before it could be stopped.")
+        await store.execute("DELETE FROM chunks WHERE repo_id = ?", [repo["id"]])
+        await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo["id"]])
+        await store.execute(
+            "UPDATE repos SET status = 'cancelled', chunk_count = 0, error_message = 'Indexing stopped by you.', "
+            "updated_at = ? WHERE id = ? AND user_id = ?",
+            [now(), repo["id"], current_user.id],
         )
     except HTTPException:
         raise
@@ -184,5 +169,5 @@ async def cancel_indexing(repo_name: str, current_user=Depends(get_current_user)
         raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         logger.exception("Could not cancel repository ingestion")
-        raise HTTPException(status_code=502, detail="Could not stop repository indexing. Please try again.") from error
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
     return {"message": "Indexing stopped", "repo_name": repo_name}

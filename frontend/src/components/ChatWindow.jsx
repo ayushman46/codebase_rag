@@ -38,6 +38,8 @@ const ChatWindow = ({ onClose }) => {
     <form onSubmit={handleSubmit} className={`relative mx-auto flex w-full items-center rounded-full border border-sand bg-pure-white p-2 shadow-lg shadow-charcoal/5 ${centered ? 'max-w-3xl' : 'max-w-5xl'}`}>
       <input
         type="text"
+        aria-label="Ask a question about the selected codebase"
+        autoComplete="off"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder="Ask about this codebase"
@@ -45,11 +47,12 @@ const ChatWindow = ({ onClose }) => {
         disabled={isQuerying || isHistoryLoading}
       />
       <div className="absolute right-[4.5rem] flex items-center text-warm-gray sm:right-[5rem]">
+        <label className="sr-only" htmlFor="model-profile-select">Answer model</label>
         <select
+          id="model-profile-select"
           value={modelProfile}
           onChange={(event) => setModelProfile(event.target.value)}
           disabled={isQuerying || isHistoryLoading}
-          aria-label="Answer model"
           className="h-10 max-w-[10.75rem] appearance-none bg-transparent px-2 pr-6 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
         >
           <option value="fast">Super 120B · Fast</option>
@@ -90,7 +93,7 @@ const ChatWindow = ({ onClose }) => {
       
       <div className="flex-1 space-y-6 overflow-y-auto bg-pure-white px-5 py-7 sm:px-10 sm:py-10">
         {isHistoryLoading && (
-          <div className="mx-auto flex h-full max-w-xl items-center justify-center gap-3 text-sm text-pewter">
+          <div className="mx-auto flex h-full max-w-xl items-center justify-center gap-3 text-sm text-pewter" role="status" aria-live="polite">
             <Loader2 className="h-4 w-4 animate-spin text-ember-orange" aria-hidden="true" />
             Loading conversation
           </div>
@@ -104,15 +107,18 @@ const ChatWindow = ({ onClose }) => {
         )}
         
         {messages.map((msg, idx) => (
-          <MessageBubble key={idx} message={msg} />
+          <MessageBubble key={msg.id || `${msg.created_at || 'message'}-${idx}`} message={msg} />
         ))}
         {isQuerying && (
-          <div className="flex items-center space-x-3 text-stone p-4 bg-warm-canvas/30 rounded-xl max-w-xs">
+          <div className="flex items-center space-x-3 text-stone p-4 bg-warm-canvas/30 rounded-xl max-w-xs" role="status" aria-live="polite">
             <Loader2 className="w-4 h-4 animate-spin text-ember-orange" />
             <span className="text-sm font-medium">Agent is analyzing...</span>
           </div>
         )}
         <div ref={bottomRef} />
+        {!isQuerying && messages.length > 0 && messages[messages.length - 1].role === 'assistant' && (
+          <p className="sr-only" role="status" aria-live="polite">Response ready.</p>
+        )}
       </div>
 
       {!isEmpty && !isHistoryLoading && (

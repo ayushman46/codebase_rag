@@ -10,7 +10,7 @@ const RepoInput = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!url) return;
+    if (!url || isIngesting) return;
     setIngesting(true);
     setSubmissionError('');
     try {
@@ -30,8 +30,11 @@ const RepoInput = () => {
   return (
     <div>
       <form onSubmit={handleSubmit} className="relative flex items-center w-full">
+        <label className="sr-only" htmlFor="repository-url">Public GitHub repository URL</label>
         <input
+          id="repository-url"
           type="url"
+          autoComplete="url"
           value={url}
           onChange={(e) => {
             setUrl(e.target.value);
@@ -40,6 +43,7 @@ const RepoInput = () => {
           placeholder="Paste repository GitHub URL..."
           className="w-full h-14 pl-6 pr-16 bg-pure-white border border-sand rounded-[20px] text-body text-ink-black focus:outline-none focus:border-stone placeholder-stone"
           disabled={isIngesting}
+          aria-describedby={submissionError ? 'repository-submission-error' : undefined}
         />
         <button
           type="submit"
@@ -50,7 +54,7 @@ const RepoInput = () => {
           {isIngesting ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowRight className="w-5 h-5" />}
         </button>
       </form>
-      {submissionError && <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-left text-sm leading-relaxed text-red-700" role="alert">{submissionError}</p>}
+      {submissionError && <p id="repository-submission-error" className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-left text-sm leading-relaxed text-red-700" role="alert">{submissionError}</p>}
     </div>
   );
 };

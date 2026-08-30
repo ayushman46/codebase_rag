@@ -7,10 +7,12 @@ const useStore = create((set, get) => ({
   selectedRepo: null,
   messages: [],
   isQuerying: false,
+  queryEpoch: 0,
   isHistoryLoading: false,
   isIngesting: false,
   isSigningIn: false,
   authError: null,
+  reposError: null,
   user: null,
 
   setUser: (user) => set({ user }),
@@ -46,7 +48,7 @@ const useStore = create((set, get) => ({
     try {
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
-      set({ user: null, selectedRepo: null, messages: [], repos: [], isHistoryLoading: false });
+      set((state) => ({ user: null, selectedRepo: null, messages: [], repos: [], isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
     } catch (e) {
       console.error("Sign-out error:", e);
     }
@@ -54,10 +56,10 @@ const useStore = create((set, get) => ({
 
   setSelectedRepo: async (repoName) => {
     if (!repoName) {
-      set({ selectedRepo: null, messages: [], isHistoryLoading: false });
+      set((state) => ({ selectedRepo: null, messages: [], isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
       return;
     }
-    set({ selectedRepo: repoName, messages: [], isHistoryLoading: true });
+    set((state) => ({ selectedRepo: repoName, messages: [], isHistoryLoading: true, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
     try {
       const res = await getConversation(repoName);
       if (get().selectedRepo === repoName) {
@@ -72,9 +74,10 @@ const useStore = create((set, get) => ({
   fetchRepos: async () => {
     try {
       const res = await getRepos();
-      set({ repos: res.data });
+      set({ repos: res.data, reposError: null });
     } catch (e) {
       console.error(e);
+      set({ reposError: 'Could not load your repositories. Please check your connection and try again.' });
     }
   },
 
@@ -132,8 +135,9 @@ const useStore = create((set, get) => ({
   askQuestion: async (question, modelProfile = 'fast') => {
     const repo = get().selectedRepo;
     if (!repo) return;
+    const queryEpoch = get().queryEpoch;
 
-    const userMsg = { role: 'user', content: question };
+    const userMsg = { id: crypto.randomUUID(), role: 'user', content: question };
     set((state) => ({ 
       messages: [...state.messages, userMsg],
       isQuerying: true
@@ -144,6 +148,7 @@ const useStore = create((set, get) => ({
       const data = res.data;
       
       const assistantMsg = {
+        id: crypto.randomUUID(),
         role: 'assistant',
         content: data.answer,
         citations: data.citations,
@@ -153,19 +158,21 @@ const useStore = create((set, get) => ({
         model_profile: data.model_profile,
       };
       
-      set((state) => ({
-        messages: [...state.messages, assistantMsg],
-        isQuerying: false
-      }));
+      set((state) => (
+        state.selectedRepo === repo && state.queryEpoch === queryEpoch
+          ? { messages: [...state.messages, assistantMsg], isQuerying: false }
+          : {}
+      ));
     } catch (e) {
       const detail = e.response?.data?.detail;
       const message = typeof detail === 'string' && detail.trim()
         ? detail
         : 'This question could not be completed right now. Your repository and conversation are unchanged; please try again shortly.';
-      set((state) => ({
-        messages: [...state.messages, { role: 'assistant', content: message, mode: 'error' }],
-        isQuerying: false
-      }));
+      set((state) => (
+        state.selectedRepo === repo && state.queryEpoch === queryEpoch
+          ? { messages: [...state.messages, { id: crypto.randomUUID(), role: 'assistant', content: message, mode: 'error' }], isQuerying: false }
+          : {}
+      ));
     }
   }
 }));

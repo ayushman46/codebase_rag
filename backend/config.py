@@ -37,7 +37,10 @@ class Settings(BaseSettings):
     embedding_retry_base_seconds: float = 2.0
     supabase_url: str = ""
     supabase_key: str = ""
-    supabase_service_role_key: str = ""
+    # Supabase remains the authentication provider. All application data is
+    # stored through this server-only Turso connection.
+    turso_database_url: str = ""
+    turso_auth_token: str = ""
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # Protect the service from excessively large repository ingestion jobs.
     max_repository_files: int = 5_000
@@ -47,6 +50,13 @@ class Settings(BaseSettings):
     # schema files while the repository-wide limits below remain in effect.
     max_file_size_bytes: int = 5_000_000
     max_repository_chunks: int = 1_500
+    # Keep the shared worker and provider capacity fair across signed-in users.
+    max_repositories_per_user: int = 30
+    max_active_ingestion_jobs_per_user: int = 1
+    ingest_requests_per_minute: int = 6
+    query_requests_per_minute: int = 12
+    max_concurrent_queries_per_user: int = 2
+    clone_timeout_seconds: int = 180
     # Retain enough diverse evidence for accurate multi-file answers without
     # turning each question into an excessively large hosted-model request.
     max_context_characters: int = 40_000
@@ -88,7 +98,10 @@ def require_nvidia_api_key() -> str:
 
 
 def get_cors_origins() -> list[str]:
-    return [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+    origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+    if "*" in origins:
+        raise ValueError("CORS_ORIGINS must list explicit origins when credentials are enabled.")
+    return origins
 
 
 def should_run_local_ingestion_worker() -> bool:
@@ -127,3 +140,45 @@ class RateLimiter:
 
 
 nvidia_rate_limiter = RateLimiter(calls_per_minute=settings.nvidia_calls_per_minute)
+
+
+class UserRequestLimiter:
+    """Small process-local fairness guard for authenticated API work.
+
+    Durable per-account quotas still live in Supabase. This limiter protects a
+    single web process from bursts before expensive provider work begins.
+    """
+
+    def __init__(self, requests_per_minute: int, max_concurrent: int = 1):
+        self.requests_per_minute = requests_per_minute
+        self.max_concurrent = max_concurrent
+        self._requests: dict[str, list[float]] = {}
+        self._active: dict[str, int] = {}
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, user_id: str) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            requests = [value for value in self._requests.get(user_id, []) if now - value < 60]
+            if len(requests) >= self.requests_per_minute:
+                raise RuntimeError("rate_limit")
+            if self._active.get(user_id, 0) >= self.max_concurrent:
+                raise RuntimeError("concurrency_limit")
+            requests.append(now)
+            self._requests[user_id] = requests
+            self._active[user_id] = self._active.get(user_id, 0) + 1
+
+    async def release(self, user_id: str) -> None:
+        async with self._lock:
+            active = max(0, self._active.get(user_id, 0) - 1)
+            if active:
+                self._active[user_id] = active
+            else:
+                self._active.pop(user_id, None)
+
+
+ingest_request_limiter = UserRequestLimiter(settings.ingest_requests_per_minute)
+query_request_limiter = UserRequestLimiter(
+    settings.query_requests_per_minute,
+    settings.max_concurrent_queries_per_user,
+)

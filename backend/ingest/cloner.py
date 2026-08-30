@@ -70,7 +70,16 @@ def clone_repo_shallow(github_url: str) -> str:
     REPOS_DIR.mkdir(parents=True, exist_ok=True)
     local_path = tempfile.mkdtemp(prefix="repo-", dir=REPOS_DIR)
     try:
-        Repo.clone_from(canonical_url, local_path, depth=1)
+        Repo.clone_from(
+            canonical_url,
+            local_path,
+            depth=1,
+            # Avoid downloading historical blobs before checkout. This reduces
+            # the blast radius of very large public repositories; the worker's
+            # post-clone limits remain a second line of defence.
+            multi_options=["--filter=blob:none"],
+            kill_after_timeout=settings.clone_timeout_seconds,
+        )
         return local_path
     except GitCommandError as error:
         shutil.rmtree(local_path, ignore_errors=True)

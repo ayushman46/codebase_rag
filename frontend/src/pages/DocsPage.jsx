@@ -76,7 +76,7 @@ const GuideNavigation = ({ activeId, onSelect, className = '' }) => (
           type="button"
           onClick={() => onSelect(id)}
           aria-current={active ? 'page' : undefined}
-          className={`text-left transition-colors ${active ? 'font-semibold text-ink-black' : 'text-warm-gray hover:text-ink-black'}`}
+          className={`min-h-11 text-left transition-colors ${active ? 'font-semibold text-ink-black' : 'text-warm-gray hover:text-ink-black'}`}
         >
           {label}
         </button>

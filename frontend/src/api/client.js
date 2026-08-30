@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { supabase } from './supabase';
 
 const api = axios.create({
   // Local development keeps the existing FastAPI port. Production uses the
@@ -6,20 +7,12 @@ const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8000/api' : '/api'),
 });
 
-// Interceptor to automatically attach Supabase Session Token
-api.interceptors.request.use((config) => {
-  const keys = Object.keys(localStorage);
-  const sbKey = keys.find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
-  if (sbKey) {
-    try {
-      const data = JSON.parse(localStorage.getItem(sbKey));
-      const token = data?.access_token;
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-    } catch (e) {
-      console.error("Error reading Supabase token from local storage:", e);
-    }
+// Ask the SDK for the current session instead of scanning every local-storage
+// entry. The SDK owns session persistence and refresh behaviour.
+api.interceptors.request.use(async (config) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.access_token) {
+    config.headers.Authorization = `Bearer ${session.access_token}`;
   }
   return config;
 });
@@ -30,6 +23,6 @@ export const getConversation = (repo_name) => api.get(`/conversations/${encodeUR
 export const getRepos = () => api.get('/repos');
 export const renameRepository = (repo_name, new_repo_name) => api.patch(`/repos/${encodeURIComponent(repo_name)}`, { repo_name: new_repo_name });
 export const deleteRepository = (repo_name) => api.delete(`/repos/${encodeURIComponent(repo_name)}`);
-export const getStatus = (repo_name) => api.get(`/status/${repo_name}`);
+export const getStatus = (repo_name) => api.get(`/status/${encodeURIComponent(repo_name)}`);
 export const cancelIndexing = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/cancel-indexing`);
 export const reindexRepository = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/reindex`);
