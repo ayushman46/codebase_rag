@@ -51,7 +51,7 @@ def get_supabase_client():
 
 supabase = get_supabase_client()
 
-JSON_COLUMNS = {"symbols", "citations", "tool_calls", "tech_stack", "file_summaries"}
+JSON_COLUMNS = {"symbols", "citations", "tool_calls", "tech_stack", "file_summaries", "excluded_reasons", "excluded_paths"}
 
 
 @dataclass(frozen=True)
@@ -86,7 +86,7 @@ class TursoStore:
                 try:
                     value[column] = json.loads(raw)
                 except json.JSONDecodeError:
-                    value[column] = [] if column in {"symbols", "citations", "tool_calls", "tech_stack"} else {}
+                    value[column] = [] if column in {"symbols", "citations", "tool_calls", "tech_stack", "excluded_paths"} else {}
         return value
 
     async def execute(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None):
@@ -227,7 +227,7 @@ async def assert_turso_schema() -> None:
             return
         try:
             store = get_turso_store()
-            for table in ("repos", "chunks", "ingestion_jobs", "chat_messages", "kt_cache"):
+            for table in ("repos", "chunks", "repo_files", "repo_dependencies", "repo_coverage", "ingestion_jobs", "chat_messages", "kt_cache"):
                 await store.execute(f"SELECT 1 FROM {table} LIMIT 1")
         except DatabaseConfigurationError:
             raise

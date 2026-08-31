@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from typing import Literal
@@ -16,16 +17,22 @@ from agent.nemotron import LLMProviderError
 from api.auth import get_current_user
 from config import ModelConfigurationError, query_request_limiter, settings
 from database import DatabaseConfigurationError, assert_turso_schema, explain_database_error, get_turso_store
-from retrieval.retriever import retrieve_context
+from retrieval.retriever import build_evidence_plan, retrieve_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_GREETING_PATTERN = re.compile(
+    r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))(?:\s+(?:there|everyone|again))?[!. ]*$",
+    re.IGNORECASE,
+)
 
 
 class QueryRequest(BaseModel):
     repo_name: str = Field(min_length=1, max_length=200)
     question: str = Field(min_length=1, max_length=4_000)
     model_profile: Literal["fast", "detailed"] = "fast"
+    workflow: Literal["general", "onboarding", "security", "architecture", "contributor", "due_diligence"] = "general"
 
 
 def timestamp() -> str:
@@ -63,7 +70,8 @@ def build_context(chunks: list[dict]) -> str:
     for chunk in chunks:
         header = (
             f"File: {chunk['file_path']} (L{chunk['start_line']}-L{chunk['end_line']})"
-            f"\nSymbols: {', '.join(chunk.get('symbols') or []) or 'not detected'}\n"
+            f"\nSymbols: {', '.join(chunk.get('symbols') or []) or 'not detected'}"
+            f"\nRetrieval reason: {'; '.join(chunk.get('_retrieval_reasons') or []) or 'source match'}\n"
         )
         budget = remaining - len(header) - 2
         if budget <= 0:
@@ -94,6 +102,15 @@ def build_no_evidence_response() -> str:
     )
 
 
+def is_greeting(question: str) -> bool:
+    """Avoid calling retrieval and an answer model for a simple greeting."""
+    return bool(_GREETING_PATTERN.fullmatch(question.strip()))
+
+
+def build_greeting_response(repo_name: str) -> str:
+    return f"Hello. What would you like to understand about **{repo_name}**?"
+
+
 async def save_message(store, *, repo_id: str, user_id: str, role: str, content: str,
                        citations: list | None = None, tool_calls: list | None = None,
                        mode: str | None = None, latency_ms: int | None = None) -> None:
@@ -118,31 +135,41 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         question = req.question.strip()
         if not question:
             raise HTTPException(status_code=422, detail="Question must contain non-whitespace text.")
-        chunks, conversation_history = await asyncio.gather(
-            retrieve_context(store, repo["id"], question, top_k=settings.retrieval_top_k),
-            get_conversation_history(store, repo["id"], current_user.id),
-        )
-        if not chunks:
-            answer, tool_calls, mode, citations = build_no_evidence_response(), [], "repository_guidance", []
+        workflow = getattr(req, "workflow", "general")
+        evidence_plan = build_evidence_plan(question, workflow)
+        if is_greeting(question):
+            answer, tool_calls, mode, citations = build_greeting_response(req.repo_name), [], "greeting", []
         else:
-            context = build_context(chunks)
-            if not context:
-                raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
-            try:
-                answer, tool_calls = await run_agent_loop(
-                    store, repo["id"], question, context, conversation_history, req.model_profile
-                )
-                mode = "rag"
-            except (LLMProviderError, ModelConfigurationError):
-                logger.warning("Live answer generation unavailable for repository %s; returning retrieved evidence", repo["id"])
-                answer, tool_calls, mode = build_retrieval_fallback(chunks), [], "retrieval_fallback"
-            citations = [
-                {
-                    "file_path": chunk["file_path"], "start_line": chunk["start_line"], "end_line": chunk["end_line"],
-                    "content": chunk["content"], "language": chunk["language"], "symbols": chunk.get("symbols", []),
-                }
-                for chunk in chunks
-            ]
+            chunks, conversation_history = await asyncio.gather(
+                retrieve_context(store, repo["id"], question, top_k=settings.retrieval_top_k, workflow=workflow),
+                get_conversation_history(store, repo["id"], current_user.id),
+            )
+            if not chunks:
+                answer, tool_calls, mode, citations = build_no_evidence_response(), [], "repository_guidance", []
+            else:
+                context = build_context(chunks)
+                if not context:
+                    raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
+                try:
+                    answer, tool_calls = await run_agent_loop(
+                        store, repo["id"], question, context, conversation_history, req.model_profile,
+                        workflow=workflow, evidence_plan=evidence_plan,
+                    )
+                    mode = "rag"
+                except (LLMProviderError, ModelConfigurationError):
+                    logger.warning("Live answer generation unavailable for repository %s; returning retrieved evidence", repo["id"])
+                    answer, tool_calls, mode = build_retrieval_fallback(chunks), [], "retrieval_fallback"
+                citations = [
+                    {
+                        "file_path": chunk["file_path"], "start_line": chunk["start_line"], "end_line": chunk["end_line"],
+                        "content": chunk["content"], "language": chunk["language"], "symbols": chunk.get("symbols", []),
+                        "retrieval_methods": chunk.get("_retrieval_methods") or ["retrieval"],
+                        "retrieval_reasons": chunk.get("_retrieval_reasons") or ["Relevant source match"],
+                        "relevance_score": chunk.get("_relevance_score", 0),
+                        "support_status": "source-backed",
+                    }
+                    for chunk in chunks
+                ]
         latency_ms = int((time.time() - started) * 1000)
         await save_message(store, repo_id=repo["id"], user_id=current_user.id, role="user", content=question)
         await save_message(
@@ -152,6 +179,7 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         return {
             "answer": answer, "mode": mode, "citations": citations, "tool_calls": tool_calls,
             "latency_ms": latency_ms, "tokens_used": 0, "model_profile": req.model_profile,
+            "workflow": workflow, "evidence_plan": evidence_plan,
         }
     except HTTPException:
         raise

@@ -32,6 +32,11 @@ EXPLORATORY_REPOSITORY_PATTERN = re.compile(
 )
 WORD_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
 MAX_CHUNKS_PER_FILE = 2
+IMPACT_QUESTION_PATTERN = re.compile(
+    r"\b(?:what\s+(?:breaks|is\s+affected)|impact|depend(?:s|encies|ent)|affected\s+files?)\b|"
+    r"\bif\s+.+\s+(?:changes?|is\s+removed|is\s+renamed)\b",
+    re.IGNORECASE,
+)
 
 # Codebases often name authentication modules `auth`, not `authentication`.
 # These small, domain-specific expansions improve keyword retrieval without
@@ -43,6 +48,45 @@ RETRIEVAL_TERM_ALIASES = {
     "authorize": ("authorization", "auth", "permission", "role"),
     "signin": ("sign_in", "login", "oauth", "auth"),
     "login": ("auth", "signin", "oauth", "session"),
+}
+
+EVIDENCE_WORKFLOWS = {
+    "general": {
+        "label": "Repository question",
+        "focus": "Answer the question from the most directly relevant source files.",
+        "terms": (),
+        "path_hints": (),
+    },
+    "onboarding": {
+        "label": "New engineer onboarding",
+        "focus": "Explain the entry points, main flow, configuration, and first files a new engineer should read.",
+        "terms": ("entrypoint", "main", "app", "config", "route", "service", "readme"),
+        "path_hints": ("readme", "main", "app", "config", "route", "server", "index"),
+    },
+    "security": {
+        "label": "Security review",
+        "focus": "Trace authentication, authorization, trust boundaries, secrets, validation, and externally reachable handlers.",
+        "terms": ("auth", "authentication", "authorization", "permission", "token", "session", "secret", "middleware", "webhook", "upload", "cors", "route", "validate", "sanitize"),
+        "path_hints": ("auth", "middleware", "security", "permission", "token", "session", "config", "route", "api", "test"),
+    },
+    "architecture": {
+        "label": "Architecture interview",
+        "focus": "Describe components, boundaries, data flow, persistence, and integration points without inventing relationships.",
+        "terms": ("module", "package", "service", "route", "config", "schema", "model", "database", "worker", "queue"),
+        "path_hints": ("app", "api", "backend", "service", "worker", "config", "schema", "model"),
+    },
+    "contributor": {
+        "label": "Open-source contributor",
+        "focus": "Point to local development, tests, conventions, CI, and the smallest safe change surface.",
+        "terms": ("contributing", "readme", "test", "tests", "ci", "workflow", "package", "script", "config"),
+        "path_hints": ("contribut", "test", "spec", "ci", "workflow", "package", "readme"),
+    },
+    "due_diligence": {
+        "label": "Technical due diligence",
+        "focus": "Summarize deployment, dependencies, license, tests, configuration, and operational risks supported by the index.",
+        "terms": ("license", "readme", "deploy", "docker", "config", "dependency", "test", "ci", "security"),
+        "path_hints": ("license", "readme", "docker", "deploy", "config", "test", "ci", "package"),
+    },
 }
 
 
@@ -57,6 +101,10 @@ def extract_requested_file_paths(query: str) -> list[str]:
 
 def is_exploratory_repository_question(query: str, requested_paths: list[str]) -> bool:
     return not requested_paths and bool(EXPLORATORY_REPOSITORY_PATTERN.search(query))
+
+
+def is_impact_question(query: str) -> bool:
+    return bool(IMPACT_QUESTION_PATTERN.search(query))
 
 
 def select_diverse_chunks(candidates: list[Dict], limit: int, excluded_ids: set[str] | None = None) -> list[Dict]:
@@ -91,8 +139,27 @@ def search_terms(query: str) -> list[str]:
     return list(dict.fromkeys(terms))[:10]
 
 
-async def sparse_search(store, repo_id: str, query: str, limit: int = 20) -> list[Dict]:
-    terms = search_terms(query)
+def build_evidence_plan(query: str, workflow: str = "general") -> dict:
+    """Create a deterministic retrieval plan that is visible to the client.
+
+    The plan guides sparse retrieval and gives the answer/UI an honest account
+    of what was targeted. It does not claim that every target exists in a
+    repository; absent targets remain an explicit evidence limitation.
+    """
+    profile = EVIDENCE_WORKFLOWS.get(workflow, EVIDENCE_WORKFLOWS["general"])
+    terms = list(dict.fromkeys([*search_terms(query), *profile["terms"]]))[:20]
+    return {
+        "workflow": workflow if workflow in EVIDENCE_WORKFLOWS else "general",
+        "label": profile["label"],
+        "focus": profile["focus"],
+        "search_terms": terms,
+        "path_hints": list(profile["path_hints"]),
+        "requested_files": extract_requested_file_paths(query),
+    }
+
+
+async def sparse_search(store, repo_id: str, query: str, limit: int = 20, plan: dict | None = None) -> list[Dict]:
+    terms = list(dict.fromkeys([*search_terms(query), *(plan or {}).get("search_terms", [])]))[:20]
     if not terms:
         return []
     # FTS5 is maintained with triggers in turso/00_init.sql. It avoids a
@@ -142,12 +209,44 @@ async def requested_file_chunks(store, repo_id: str, file_path: str, limit: int)
     )
 
 
-async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8) -> List[Dict]:
+async def path_hint_chunks(store, repo_id: str, hint: str, limit: int = 2) -> list[Dict]:
+    """Fetch a small representative sample for an evidence-plan path hint."""
+    return await store.fetch_all(
+        "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
+        "WHERE repo_id = ? AND lower(file_path) LIKE ? ORDER BY file_path, start_line LIMIT ?",
+        [repo_id, f"%{hint.lower()}%", limit],
+    )
+
+
+async def dependent_file_chunks(store, repo_id: str, target_paths: list[str], limit: int = 20) -> list[Dict]:
+    """Retrieve files that import a target according to the resolved graph."""
+    if not target_paths:
+        return []
+    target_conditions = []
+    target_args = []
+    for path in target_paths:
+        target_conditions.append("(d.target_file = ? OR d.target_file LIKE ?)")
+        target_args.extend([path, f"%/{path}"])
+    return await store.fetch_all(
+        "SELECT DISTINCT c.id, c.file_path, c.start_line, c.end_line, c.language, c.symbols, c.content "
+        "FROM repo_dependencies d JOIN chunks c ON c.repo_id = d.repo_id AND c.file_path = d.source_file "
+        f"WHERE d.repo_id = ? AND ({' OR '.join(target_conditions)}) "
+        "ORDER BY c.file_path, c.start_line LIMIT ?",
+        [repo_id, *target_args, limit],
+    )
+
+
+async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, workflow: str = "general") -> List[Dict]:
     requested_paths = extract_requested_file_paths(query)
     include_overview = is_exploratory_repository_question(query, requested_paths)
+    evidence_plan = build_evidence_plan(query, workflow)
 
-    sparse_task = asyncio.create_task(sparse_search(store, repo_id, query))
+    sparse_task = asyncio.create_task(sparse_search(store, repo_id, query, plan=evidence_plan))
     file_tasks = [asyncio.create_task(requested_file_chunks(store, repo_id, path, top_k)) for path in requested_paths]
+    plan_tasks = [
+        asyncio.create_task(path_hint_chunks(store, repo_id, hint))
+        for hint in evidence_plan.get("path_hints", [])[:8]
+    ]
     readme_task = (
         asyncio.create_task(store.fetch_all(
             "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
@@ -168,7 +267,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8) -> L
         logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
         dense_task = None
 
-    pending = [sparse_task, *file_tasks]
+    pending = [sparse_task, *file_tasks, *plan_tasks]
     if dense_task:
         pending.insert(0, dense_task)
     if readme_task:
@@ -191,19 +290,73 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8) -> L
     cursor += 1
     file_results = successful[cursor:cursor + len(file_tasks)]
     cursor += len(file_tasks)
+    plan_results = successful[cursor:cursor + len(plan_tasks)]
+    cursor += len(plan_tasks)
     readme_chunks = successful[cursor] if readme_task else []
     cursor += 1 if readme_task else 0
     overview_chunks = successful[cursor] if overview_task else []
 
-    requested_map = {chunk["id"]: chunk for rows in file_results for chunk in rows}
+    def annotate(chunk: Dict, method: str, reason: str) -> Dict:
+        enriched = dict(chunk)
+        enriched["_retrieval_methods"] = list(dict.fromkeys([*(enriched.get("_retrieval_methods") or []), method]))
+        enriched["_retrieval_reasons"] = list(dict.fromkeys([*(enriched.get("_retrieval_reasons") or []), reason]))
+        enriched["_evidence_plan"] = evidence_plan
+        return enriched
+
+    requested_map = {
+        chunk["id"]: annotate(chunk, "requested_file", "Explicit file path requested in the question")
+        for rows in file_results for chunk in rows
+    }
     requested_chunks = sorted(requested_map.values(), key=lambda chunk: (chunk["file_path"], chunk["start_line"]))
+    planned_map: dict[str, Dict] = {}
+    for hint, rows in zip(evidence_plan.get("path_hints", [])[:8], plan_results):
+        for chunk in rows:
+            planned_map[chunk["id"]] = annotate(
+                chunk,
+                "workflow_target",
+                f"Evidence-plan target matching the '{hint}' path hint",
+            )
     scores: dict[str, float] = {}
     chunk_map: dict[str, Dict] = {}
-    for source in (dense_chunks, sparse_chunks):
+    for chunk in requested_chunks:
+        chunk_map[chunk["id"]] = chunk
+        scores[chunk["id"]] = 2.0
+    for chunk in planned_map.values():
+        chunk_map[chunk["id"]] = chunk
+        scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.015
+    for source, method, reason in (
+        (dense_chunks, "semantic", "Semantic similarity to the question"),
+        (sparse_chunks, "keyword", "Keyword match in file path or source content"),
+    ):
         for rank, chunk in enumerate(source):
-            chunk_map[chunk["id"]] = chunk
+            annotated = annotate(chunk_map.get(chunk["id"], chunk), method, reason)
+            chunk_map[chunk["id"]] = annotated
             scores[chunk["id"]] = scores.get(chunk["id"], 0) + 1.0 / (60 + rank + 1)
+            if any(hint in str(chunk.get("file_path", "")).lower() for hint in evidence_plan["path_hints"]):
+                scores[chunk["id"]] += 0.01
     ranked_chunks = [chunk_map[chunk_id] for chunk_id in sorted(scores, key=scores.get, reverse=True)]
+
+    # Impact questions get one extra, explicitly labelled pass over the
+    # resolved dependency graph. If no file is named, use only a few directly
+    # matched files as targets; unresolved package aliases are never invented.
+    dependency_chunks: list[Dict] = []
+    if is_impact_question(query):
+        target_paths = list(requested_paths)
+        if not target_paths:
+            target_paths = list(dict.fromkeys(chunk["file_path"] for chunk in sparse_chunks[:3]))
+        try:
+            dependency_chunks = await dependent_file_chunks(store, repo_id, target_paths)
+        except Exception as error:
+            logger.warning("Dependency impact retrieval unavailable for %s (%s)", repo_id, type(error).__name__)
+        for chunk in dependency_chunks:
+            annotated = annotate(
+                chunk_map.get(chunk["id"], chunk),
+                "dependency",
+                "Depends on a directly matched file in the indexed repository graph",
+            )
+            chunk_map[chunk["id"]] = annotated
+            scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.02
+        ranked_chunks = [chunk_map[chunk_id] for chunk_id in sorted(scores, key=scores.get, reverse=True)]
     # Broad overview evidence is a fallback, never an automatic citation. If
     # dense or sparse retrieval has direct evidence, that evidence remains the
     # entire source set. This prevents README.md from appearing beside an
@@ -211,11 +364,13 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8) -> L
     if include_overview and not ranked_chunks:
         fallback_by_id: dict[str, Dict] = {}
         for chunk in [*readme_chunks, *overview_chunks]:
-            fallback_by_id.setdefault(chunk["id"], chunk)
+            fallback_by_id.setdefault(chunk["id"], annotate(chunk, "overview", "Repository-wide overview fallback; no direct term match"))
         ranked_chunks = list(fallback_by_id.values())
 
     requested_ids = {chunk["id"] for chunk in requested_chunks}
     final_chunks = requested_chunks[:top_k]
     if len(final_chunks) < top_k:
         final_chunks.extend(select_diverse_chunks(ranked_chunks, top_k - len(final_chunks), requested_ids))
+    for chunk in final_chunks:
+        chunk["_relevance_score"] = round(scores.get(chunk["id"], 0.0), 6)
     return final_chunks

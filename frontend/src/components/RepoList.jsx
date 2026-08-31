@@ -190,6 +190,29 @@ const RepoList = () => {
                   </div>
 
                   {isActive && <IngestionProgress repo={repo} compact />}
+                  {repo.eligible_files > 0 && (() => {
+                    const indexed = repo.indexed_files || 0;
+                    const percent = Math.round((indexed / repo.eligible_files) * 100);
+                    return (
+                      <p className="mt-2 text-xs leading-relaxed text-warm-gray">
+                        Indexed {percent}% of eligible source ({indexed}/{repo.eligible_files} files)
+                        {repo.excluded_files ? ` · ${repo.excluded_files} omitted by policy` : ''}
+                      </p>
+                    );
+                  })()}
+                  {repo.excluded_reasons && Object.keys(repo.excluded_reasons).length > 0 && (
+                    <details className="mt-1 text-xs text-warm-gray">
+                      <summary className="cursor-pointer hover:text-charcoal">Why files were omitted</summary>
+                      <p className="mt-1 leading-relaxed">
+                        {Object.entries(repo.excluded_reasons).map(([reason, count]) => `${reason.replaceAll('_', ' ')}: ${count}`).join(' · ')}
+                      </p>
+                      {repo.excluded_paths?.length > 0 && (
+                        <p className="mt-1 max-h-24 overflow-y-auto break-all text-warm-gray">
+                          {repo.excluded_paths.join(' · ')}
+                        </p>
+                      )}
+                    </details>
+                  )}
                   {repo.error_message && !isActive && (
                     <p className={`mt-3 border-l pl-3 text-xs leading-relaxed ${isCancelled ? 'border-sand text-pewter' : isReady ? 'border-amber-300 text-pewter' : 'border-red-300 text-red-600'}`}>{repo.error_message}</p>
                   )}

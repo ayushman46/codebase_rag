@@ -33,6 +33,46 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS chunks_by_repo_file ON chunks(repo_id, file_path, start_line);
 
+-- One row per indexed repository file.  Hashes let re-indexing skip unchanged
+-- files while still removing files that disappeared from the latest clone.
+CREATE TABLE IF NOT EXISTS repo_files (
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  byte_size INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS repo_files_by_repo ON repo_files(repo_id, file_path);
+
+-- Resolved, same-repository imports used for conservative change-impact
+-- retrieval. External/ambiguous packages are intentionally not recorded.
+CREATE TABLE IF NOT EXISTS repo_dependencies (
+  repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  source_file TEXT NOT NULL,
+  target_file TEXT NOT NULL,
+  import_name TEXT NOT NULL,
+  line_number INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (repo_id, source_file, target_file, line_number)
+);
+
+CREATE INDEX IF NOT EXISTS repo_dependencies_target ON repo_dependencies(repo_id, target_file);
+
+-- Ingestion coverage is explicit so the UI can distinguish indexed source
+-- from files omitted by policy (size, format, ignore rules, or limits).
+CREATE TABLE IF NOT EXISTS repo_coverage (
+  repo_id TEXT PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+  total_seen_files INTEGER NOT NULL DEFAULT 0,
+  eligible_files INTEGER NOT NULL DEFAULT 0,
+  indexed_files INTEGER NOT NULL DEFAULT 0,
+  excluded_files INTEGER NOT NULL DEFAULT 0,
+  excluded_bytes INTEGER NOT NULL DEFAULT 0,
+  excluded_reasons TEXT NOT NULL DEFAULT '{}',
+  excluded_paths TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL
+);
+
 -- Full-text retrieval keeps code search responsive without making semantic
 -- retrieval approximate. The external-content index stores no duplicate
 -- source text and its triggers keep it in sync with chunks.

@@ -18,7 +18,7 @@ api.interceptors.request.use(async (config) => {
 });
 
 export const ingestRepo = (github_url) => api.post('/ingest', { github_url });
-export const queryRepo = (repo_name, question, model_profile = 'fast') => api.post('/query', { repo_name, question, model_profile });
+export const queryRepo = (repo_name, question, model_profile = 'fast', workflow = 'general') => api.post('/query', { repo_name, question, model_profile, workflow });
 export const getConversation = (repo_name) => api.get(`/conversations/${encodeURIComponent(repo_name)}`);
 export const getRepos = () => api.get('/repos');
 export const renameRepository = (repo_name, new_repo_name) => api.patch(`/repos/${encodeURIComponent(repo_name)}`, { repo_name: new_repo_name });

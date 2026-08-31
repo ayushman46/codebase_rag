@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -91,10 +92,49 @@ def clone_repo_shallow(github_url: str) -> str:
         raise
 
 
-def get_files_to_process(repo_path: str) -> list[str]:
-    """Return deterministic, bounded, non-binary source/documentation files."""
+def _excluded_file_reason(filepath: str) -> str | None:
+    """Explain why a file is not eligible for indexing.
+
+    Keep this policy in one place so coverage numbers and the actual file
+    selection cannot drift apart. Reasons are deliberately stable because they
+    are persisted in the repository coverage report and shown to users.
+    """
+    filename = os.path.basename(filepath)
+    lower_name = filename.lower()
+    if os.path.islink(filepath):
+        return "symlink"
+    if lower_name in SKIP_FILENAMES:
+        return "lockfile"
+    if ".min." in lower_name:
+        return "minified"
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        return "unreadable"
+    if size > settings.max_file_size_bytes:
+        return "file_size_limit"
+    _, ext = os.path.splitext(lower_name)
+    if ext not in TEXT_EXTENSIONS and lower_name not in TEXT_FILENAMES:
+        return "unsupported_format"
+    if not is_probably_text_file(filepath):
+        return "binary_or_invalid_text"
+    return None
+
+
+def get_file_selection_report(repo_path: str) -> dict:
+    """Return selected files plus an auditable exclusion report.
+
+    ``total_seen_files`` counts files in non-ignored directories, while
+    ``eligible_files`` counts files that passed format/size/text checks. A
+    repository-level limit remains a hard safety boundary and is reported as an
+    error instead of silently indexing a misleading partial repository.
+    """
     files_list: list[str] = []
+    total_seen = 0
     total_bytes = 0
+    excluded_bytes = 0
+    reasons: Counter[str] = Counter()
+    excluded_paths: list[str] = []
     for root, dirs, files in os.walk(repo_path, followlinks=False):
         dirs[:] = [
             directory for directory in dirs
@@ -102,10 +142,21 @@ def get_files_to_process(repo_path: str) -> list[str]:
             and not os.path.islink(os.path.join(root, directory))
         ]
         for file_name in files:
-            if file_name.startswith("."):
-                continue
+            total_seen += 1
             abs_path = os.path.join(root, file_name)
-            if os.path.islink(abs_path) or not should_process_file(abs_path):
+            relative_path = os.path.relpath(abs_path, repo_path).replace(os.sep, "/")
+            if file_name.startswith("."):
+                reasons["hidden"] += 1
+                excluded_paths.append(relative_path)
+                continue
+            reason = _excluded_file_reason(abs_path)
+            if reason:
+                reasons[reason] += 1
+                excluded_paths.append(relative_path)
+                try:
+                    excluded_bytes += os.path.getsize(abs_path)
+                except OSError:
+                    pass
                 continue
             size = os.path.getsize(abs_path)
             total_bytes += size
@@ -114,7 +165,22 @@ def get_files_to_process(repo_path: str) -> list[str]:
                     "Repository exceeds the configured ingestion limit. Use a smaller repository."
                 )
             files_list.append(abs_path)
-    return sorted(files_list)
+    files_list = sorted(files_list)
+    return {
+        "files": files_list,
+        "total_seen_files": total_seen,
+        "eligible_files": len(files_list),
+        "excluded_files": sum(reasons.values()),
+        "excluded_bytes": excluded_bytes,
+        "excluded_reasons": dict(sorted(reasons.items())),
+        "excluded_paths": sorted(excluded_paths),
+        "eligible_bytes": total_bytes,
+    }
+
+
+def get_files_to_process(repo_path: str) -> list[str]:
+    """Backward-compatible file list API used by callers and integrations."""
+    return get_file_selection_report(repo_path)["files"]
 
 
 def cleanup_repo(repo_path: str):

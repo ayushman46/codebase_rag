@@ -34,6 +34,7 @@ const guide = [
     summary: 'The source is filtered, structured, and prepared for retrieval.',
     paragraphs: [
       'Indexing begins when you submit a public GitHub repository URL. The service validates the repository, creates a shallow clone, and filters files that are unsupported, generated, binary, or too large to be useful evidence.',
+      'The workspace reports how many eligible files were indexed and why other files were omitted. Re-indexing compares file hashes and refreshes only changed files, while a conservative local dependency map supports change-impact questions.',
     ],
     steps: [
       ['01', 'Validate and clone', 'The repository URL is checked and a temporary shallow copy is created.'],
@@ -50,7 +51,7 @@ const guide = [
     summary: 'Questions are answered from a bounded selection of relevant source.',
     paragraphs: [
       'For each question, Codebase Intel searches for the most relevant source sections using semantic similarity and keyword search. Only that bounded evidence is passed to answer generation, rather than the entire repository.',
-      'Every response includes file and line-range citations. If live answer generation or semantic retrieval is temporarily unavailable, the workspace still returns the retrieved source context so you can continue investigating directly from the code.',
+      'Every response includes file and line-range citations plus a short explanation of why each file was selected. Choose a workflow such as security review or onboarding to focus retrieval and answer structure. If a requested claim is not established, the answer identifies that evidence limit instead of guessing.',
     ],
   },
   {

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 from ingest.chunker import chunk_file, extract_symbols
-from ingest.cloner import RepositoryValidationError, get_files_to_process, normalize_github_url
+from ingest.cloner import RepositoryValidationError, get_file_selection_report, get_files_to_process, normalize_github_url
 from ingest.embedder import EMBEDDING_DIMENSION, EmbeddingUnavailableError, embed_chunks
 
 
@@ -95,6 +95,8 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(get_answer_model_options("detailed")[0], "nvidia/nemotron-3-ultra-550b-a55b")
         with self.assertRaises(ValidationError):
             QueryRequest(repo_name="demo", question="Where is login?", model_profile="untrusted/model")
+        with self.assertRaises(ValidationError):
+            QueryRequest(repo_name="demo", question="Where is login?", workflow="untrusted")
 
     def test_credentials_cors_rejects_a_wildcard_origin(self):
         from config import get_cors_origins
@@ -141,15 +143,86 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
 
-    def test_ensure_repo_record_resets_failed_repository_for_its_owner(self):
+    def test_ensure_repo_record_queues_failed_repository_without_erasing_old_index(self):
         from ingest.pipeline import ensure_repo_record
         store = MemoryStore()
         store.rows = [{"id": "repo-1", "status": "failed"}]
         with patch("ingest.pipeline.timestamp", return_value="2026-01-01T00:00:00+00:00"):
             repo_id, name = asyncio.run(ensure_repo_record(store, "https://github.com/octocat/Hello-World", "user-1"))
         self.assertEqual((repo_id, name), ("repo-1", "Hello-World"))
-        self.assertIn("DELETE FROM chunks", store.executed[1][0])
+        self.assertNotIn("DELETE FROM chunks", " ".join(sql for sql, _ in store.executed))
         self.assertTrue(all("user-1" in args for _, args in store.executed if args and "repos" in _))
+
+    def test_file_selection_report_discloses_exclusion_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            (root / "src" / "large.py").write_text("x" * 120, encoding="utf-8")
+            (root / "image.png").write_bytes(b"\x89PNG\x00")
+            (root / ".env").write_text("SECRET=x", encoding="utf-8")
+            with patch("ingest.cloner.settings.max_file_size_bytes", 100):
+                report = get_file_selection_report(str(root))
+        self.assertEqual(report["eligible_files"], 1)
+        self.assertEqual(report["excluded_reasons"]["file_size_limit"], 1)
+        self.assertEqual(report["excluded_reasons"]["unsupported_format"], 1)
+        self.assertEqual(report["excluded_reasons"]["hidden"], 1)
+        self.assertEqual(set(report["excluded_paths"]), {"src/large.py", "image.png", ".env"})
+
+    def test_evidence_plan_targets_security_paths(self):
+        from retrieval.retriever import build_evidence_plan
+        plan = build_evidence_plan("How does authentication work?", "security")
+        self.assertEqual(plan["workflow"], "security")
+        self.assertIn("middleware", plan["path_hints"])
+        self.assertIn("auth", plan["search_terms"])
+
+    def test_dependency_manifest_resolves_only_local_imports(self):
+        from ingest.dependencies import build_dependency_manifest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            entry = root / "src" / "main.py"
+            auth = root / "src" / "auth.py"
+            entry.write_text("from src.auth import login\n", encoding="utf-8")
+            auth.write_text("def login(): pass\n", encoding="utf-8")
+            edges = build_dependency_manifest([str(entry), str(auth)], str(root))
+        self.assertEqual(edges[0]["source_file"], "src/main.py")
+        self.assertEqual(edges[0]["target_file"], "src/auth.py")
+
+    def test_dependency_manifest_resolves_relative_imports(self):
+        from ingest.dependencies import build_dependency_manifest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pkg").mkdir()
+            entry = root / "pkg" / "main.py"
+            auth = root / "pkg" / "auth.py"
+            entry.write_text("from .auth import login\n", encoding="utf-8")
+            auth.write_text("def login(): pass\n", encoding="utf-8")
+            edges = build_dependency_manifest([str(entry), str(auth)], str(root))
+        self.assertEqual(edges[0]["target_file"], "pkg/auth.py")
+
+    def test_file_manifest_changes_only_when_content_changes(self):
+        from ingest.pipeline import build_file_manifest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "app.py"
+            source.write_text("print('one')\n", encoding="utf-8")
+            first = build_file_manifest([str(source)], str(root))
+            source.write_text("print('two')\n", encoding="utf-8")
+            second = build_file_manifest([str(source)], str(root))
+        self.assertEqual(set(first), {"app.py"})
+        self.assertNotEqual(first["app.py"]["content_hash"], second["app.py"]["content_hash"])
+
+    def test_impact_retrieval_query_is_parameterized(self):
+        from retrieval.retriever import dependent_file_chunks
+
+        store = MemoryStore()
+        store.fetch_all = AsyncMock(return_value=[{"id": "caller", "file_path": "src/main.py"}])
+        rows = asyncio.run(dependent_file_chunks(store, "repo-1", ["auth.py"]))
+        self.assertEqual(rows[0]["id"], "caller")
+        sql, args = store.fetch_all.call_args.args
+        self.assertIn("repo_dependencies", sql)
+        self.assertEqual(args[:3], ["repo-1", "auth.py", "%/auth.py"])
 
     def test_worker_claim_keeps_turso_row_as_plain_mapping(self):
         from ingest.pipeline import claim_next_ingestion_job
@@ -207,13 +280,31 @@ class BackendSmokeTests(unittest.TestCase):
              patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Direct answer\nLogin is in auth.py.", []))):
             response = asyncio.run(query_repo(request, user))
         self.assertEqual(response["mode"], "rag")
+        self.assertEqual(response["citations"][0]["support_status"], "source-backed")
+        self.assertTrue(response["citations"][0]["retrieval_reasons"])
         self.assertEqual(sum("INSERT INTO chat_messages" in sql for sql, _ in store.executed), 2)
+
+    def test_query_response_exposes_the_selected_evidence_workflow(self):
+        from api.query_router import query_repo
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="Review authentication", model_profile="fast", workflow="security")
+        chunks = [{"id": "chunk-1", "file_path": "src/auth.py", "start_line": 1, "end_line": 5, "language": "py", "symbols": [], "content": "def login(): pass", "_retrieval_reasons": ["Security review target matching the 'auth' path hint"]}]
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.get_conversation_history", new=AsyncMock(return_value=[])), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Direct answer\nAuthentication is in auth.py.", []))):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["workflow"], "security")
+        self.assertEqual(response["evidence_plan"]["workflow"], "security")
 
     def test_query_returns_guidance_without_matching_source(self):
         from api.query_router import query_repo
         store = MemoryStore()
         user = SimpleNamespace(id="user-1")
-        request = SimpleNamespace(repo_name="demo", question="hi", model_profile="fast")
+        request = SimpleNamespace(repo_name="demo", question="Explain the deployment topology", model_profile="fast")
         with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
              patch("api.query_router.get_turso_store", return_value=store), \
              patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
@@ -222,6 +313,29 @@ class BackendSmokeTests(unittest.TestCase):
             response = asyncio.run(query_repo(request, user))
         self.assertEqual(response["mode"], "repository_guidance")
         self.assertIn("explore this repository", response["answer"])
+
+    def test_greeting_skips_retrieval_and_never_calls_the_answer_model(self):
+        from api.query_router import query_repo
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="hi", model_profile="fast")
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
+             patch("api.query_router.retrieve_context", new=AsyncMock()) as retrieve, \
+             patch("api.query_router.run_agent_loop", new=AsyncMock()) as answer_model:
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["mode"], "greeting")
+        self.assertEqual(response["citations"], [])
+        self.assertIn("What would you like to understand", response["answer"])
+        retrieve.assert_not_awaited()
+        answer_model.assert_not_awaited()
+
+    def test_provider_planning_is_rejected_before_it_reaches_chat_history(self):
+        from agent.nemotron import LLMProviderError, user_facing_content
+        with self.assertRaises(LLMProviderError):
+            user_facing_content("The user said 'hi'. I should respond politely without citations.")
+        self.assertEqual(user_facing_content("<think>private plan</think>\nHello."), "Hello.")
 
     def test_recover_stuck_repos_fixes_intermediate_status_when_job_completed(self):
         from ingest.pipeline import recover_stuck_repos

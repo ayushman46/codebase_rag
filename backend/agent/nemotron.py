@@ -1,6 +1,7 @@
 """Small NVIDIA NIM client boundary used by all model-backed query work."""
 
 import asyncio
+import re
 from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
@@ -10,6 +11,33 @@ from config import nvidia_rate_limiter, require_nvidia_api_key, settings
 
 class LLMProviderError(RuntimeError):
     """A safe, user-facing failure from the configured model provider."""
+
+
+_THINKING_BLOCK = re.compile(r"<(?:think|analysis|reasoning)>.*?</(?:think|analysis|reasoning)>", re.IGNORECASE | re.DOTALL)
+_FINAL_LABEL = re.compile(
+    r"(?ims)^\s*(?:final(?:\s+(?:answer|response))?|assistant\s+response)\s*:\s*(.+)\Z"
+)
+_INTERNAL_PLANNING_PREFIX = re.compile(
+    r"^\s*(?:analysis\s*:|reasoning\s*:|the user (?:said|asked|is asking)|"
+    r"i (?:should|need to|will)|we (?:should|need to|will)|no need to)\b",
+    re.IGNORECASE,
+)
+
+
+def user_facing_content(content: str) -> str:
+    """Reject provider planning text instead of displaying it in the chat UI.
+
+    Some hosted model templates can emit a planning trace in ``content`` even
+    when thinking is disabled. It is not an answer and must never be saved to
+    a user's conversation history.
+    """
+    cleaned = _THINKING_BLOCK.sub("", content).strip()
+    final_match = _FINAL_LABEL.search(cleaned)
+    if final_match:
+        cleaned = final_match.group(1).strip()
+    if not cleaned or _INTERNAL_PLANNING_PREFIX.match(cleaned):
+        raise LLMProviderError("NVIDIA returned internal planning instead of a user-facing answer.")
+    return cleaned
 
 
 def is_transient_provider_error(error: Exception) -> bool:
@@ -69,7 +97,7 @@ async def complete(
                 content = response.choices[0].message.content
                 if not isinstance(content, str) or not content.strip():
                     raise LLMProviderError("NVIDIA returned a completion without answer content.")
-                return content.strip()
+                return user_facing_content(content)
             except LLMProviderError:
                 raise
             except Exception as error:

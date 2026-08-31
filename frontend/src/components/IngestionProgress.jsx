@@ -78,6 +78,14 @@ const IngestionProgress = ({ repo, compact = false }) => {
         <span className="text-caption font-semibold uppercase tracking-wider text-warm-gray">{isReady ? 'Complete' : isFailed ? 'Stopped' : info.embeddingProgress ? `${info.embeddingProgress.percent}% indexed` : `Step ${info.index + 1} of ${stages.length}`}</span>
       </div>
       <p className="mt-4 max-w-2xl text-sm leading-relaxed text-pewter">{repo.error_message || info.detail}</p>
+      {repo.eligible_files > 0 && (
+        <p className="mt-2 text-xs leading-relaxed text-warm-gray">
+          {isReady
+            ? `Indexed ${Math.round(((repo.indexed_files || 0) / repo.eligible_files) * 100)}% of eligible source (${repo.indexed_files || 0}/${repo.eligible_files} files)`
+            : `Eligible source files: ${repo.eligible_files}`}
+          {repo.excluded_files ? ` · ${repo.excluded_files} omitted by policy` : ''}
+        </p>
+      )}
 
       {!isFailed && (
         <>

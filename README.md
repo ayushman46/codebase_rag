@@ -32,6 +32,13 @@ This version replaces the previous Supabase/Postgres data layer. Existing Supaba
    turso db shell codebase-intel < turso/00_init.sql
    ```
 
+   If the database already has the original schema, apply the additive trust
+   metadata migration as well:
+
+   ```bash
+   turso db shell codebase-intel < turso/01_trust_features.sql
+   ```
+
 4. Copy the database URL and create a write-capable application token:
 
    ```bash
@@ -102,10 +109,19 @@ The FastAPI process starts a durable ingestion worker by default. It atomically 
 2. The service queues a Turso job before returning to the browser.
 3. A worker shallow-clones, filters unsupported/binary/generated files, chunks source content, and records file paths and true line ranges.
 4. NVIDIA produces 2,048-dimensional embeddings in small retrying batches.
-5. The worker writes chunks and vectors in bounded batches, builds factual file metadata, and marks the repository ready.
-6. A failed embedding service does not discard usable source: the repository becomes ready with keyword retrieval and a clear status note.
+5. The worker records a SHA-256 manifest, writes chunks and vectors in bounded batches, builds factual file metadata, and marks the repository ready.
+6. Re-indexing compares the manifest and re-embeds only changed files; removed files have their stale chunks deleted. If a re-index fails, unchanged evidence remains available.
+7. A conservative dependency pass records only imports/includes resolved to files in the same checkout. Impact questions use those edges to retrieve likely dependents and label them as dependency evidence.
+8. A failed embedding service does not discard usable source: the repository becomes ready with keyword retrieval and a clear status note.
 
 Repository limits are configurable. Defaults allow up to 5,000 files, 25 MB total source, 5 MB per individual source file, and 1,500 chunks per repository.
+
+The repository list reports coverage as indexed files versus eligible source
+files and records omission reasons and paths for hidden files, lockfiles,
+unsupported formats, binary content, chunking failures, and the per-file size limit. Files in
+intentionally ignored directories are not traversed; the report therefore
+describes the indexing policy rather than claiming that every byte of a
+checkout is indexed.
 
 ## Retrieval and answers
 
@@ -115,8 +131,17 @@ Retrieval combines:
 - Parameterized keyword matching over source contents and paths.
 - Exact/suffix matching when a question names a file such as `sql/schema.sql`.
 - A bounded README and source overview for architecture or comparison questions.
+- Resolved same-repository dependency edges for impact questions such as “what breaks if this file changes?”.
 
-Results are fused and made file-diverse before a bounded context reaches the answer model. The answer prompt requires Markdown headings, bold file names, concise steps, and source-backed claims. When no evidence matches, the UI returns useful repository guidance rather than a generic error; when live answer generation is unavailable, it returns the retrieved cited evidence.
+Results are fused and made file-diverse before a bounded context reaches the answer model. Each citation includes the exact path and line range plus why it was selected (explicit file request, keyword match, semantic similarity, or overview fallback). The response also returns the deterministic evidence plan used for the question.
+
+The chat workflow selector can target general questions, new-engineer
+onboarding, security review, architecture interviews, open-source contribution,
+or technical due diligence. These profiles bias retrieval toward relevant files
+and constrain the answer organization; they never assert that a target exists
+when the index does not contain it. The answer prompt requires Markdown
+headings, bold file names, concise steps, and an explicit `Evidence limits`
+section when a claim is not established by the supplied source.
 
 ## Google sign-in
 
@@ -170,4 +195,4 @@ cd ..
 npm --prefix frontend run build
 ```
 
-The suite covers configuration failures, parameterized Turso storage, JSON metadata, chunk persistence without embeddings, authentication-independent API flows, repository ownership queries, source filtering/chunking, and resilient retrieval.
+The suite covers configuration failures, parameterized Turso storage, JSON metadata, chunk persistence without embeddings, authentication-independent API flows, repository ownership queries, source filtering/chunking, coverage/exclusion reporting, allow-listed evidence workflows, resilient retrieval, and incremental manifest behavior.

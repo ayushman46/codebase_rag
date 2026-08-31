@@ -19,6 +19,7 @@ const ChatWindow = ({ onClose }) => {
   const { selectedRepo, user, messages, askQuestion, isQuerying, isHistoryLoading } = useStore();
   const [input, setInput] = useState('');
   const [modelProfile, setModelProfile] = useState('fast');
+  const [workflow, setWorkflow] = useState('general');
   const bottomRef = useRef(null);
   const isEmpty = messages.length === 0 && !isQuerying && !isHistoryLoading;
   const name = firstName(user);
@@ -30,7 +31,7 @@ const ChatWindow = ({ onClose }) => {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!input.trim() || isQuerying || isHistoryLoading) return;
-    askQuestion(input, modelProfile);
+    askQuestion(input, modelProfile, workflow);
     setInput('');
   };
 
@@ -46,19 +47,39 @@ const ChatWindow = ({ onClose }) => {
         className="h-14 w-full bg-transparent pl-5 pr-48 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6 sm:pr-56"
         disabled={isQuerying || isHistoryLoading}
       />
-      <div className="absolute right-[4.5rem] flex items-center text-warm-gray sm:right-[5rem]">
-        <label className="sr-only" htmlFor="model-profile-select">Answer model</label>
-        <select
-          id="model-profile-select"
-          value={modelProfile}
-          onChange={(event) => setModelProfile(event.target.value)}
-          disabled={isQuerying || isHistoryLoading}
-          className="h-10 max-w-[10.75rem] appearance-none bg-transparent px-2 pr-6 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
-        >
-          <option value="fast">Super 120B · Fast</option>
-          <option value="detailed">Ultra 550B · Detailed</option>
-        </select>
-        <ChevronDown className="pointer-events-none absolute right-1 h-3.5 w-3.5" aria-hidden="true" />
+      <div className="absolute right-[4.5rem] flex items-center gap-1 text-warm-gray sm:right-[5rem]">
+        <div className="relative flex items-center">
+          <label className="sr-only" htmlFor="model-profile-select">Answer model</label>
+          <select
+            id="model-profile-select"
+            value={modelProfile}
+            onChange={(event) => setModelProfile(event.target.value)}
+            disabled={isQuerying || isHistoryLoading}
+            className="h-10 max-w-[10.75rem] appearance-none bg-transparent px-2 pr-6 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
+          >
+            <option value="fast">Super 120B · Fast</option>
+            <option value="detailed">Ultra 550B · Detailed</option>
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-1 h-3.5 w-3.5" aria-hidden="true" />
+        </div>
+        <div className="relative flex items-center">
+          <label className="sr-only" htmlFor="workflow-select">Answer workflow</label>
+          <select
+            id="workflow-select"
+            value={workflow}
+            onChange={(event) => setWorkflow(event.target.value)}
+            disabled={isQuerying || isHistoryLoading}
+            className="h-10 max-w-[9rem] appearance-none bg-transparent px-2 pr-5 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
+          >
+            <option value="general">Repository question</option>
+            <option value="onboarding">New engineer onboarding</option>
+            <option value="security">Security review</option>
+            <option value="architecture">Architecture interview</option>
+            <option value="contributor">Open-source contributor</option>
+            <option value="due_diligence">Technical due diligence</option>
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-0 h-3.5 w-3.5" aria-hidden="true" />
+        </div>
       </div>
       <button
         type="submit"

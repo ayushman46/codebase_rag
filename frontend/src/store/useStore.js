@@ -132,7 +132,7 @@ const useStore = create((set, get) => ({
     }));
   },
 
-  askQuestion: async (question, modelProfile = 'fast') => {
+  askQuestion: async (question, modelProfile = 'fast', workflow = 'general') => {
     const repo = get().selectedRepo;
     if (!repo) return;
     const queryEpoch = get().queryEpoch;
@@ -144,7 +144,7 @@ const useStore = create((set, get) => ({
     }));
 
     try {
-      const res = await queryRepo(repo, question, modelProfile);
+      const res = await queryRepo(repo, question, modelProfile, workflow);
       const data = res.data;
       
       const assistantMsg = {
@@ -156,6 +156,8 @@ const useStore = create((set, get) => ({
         mode: data.mode,
         latency_ms: data.latency_ms,
         model_profile: data.model_profile,
+        workflow: data.workflow,
+        evidence_plan: data.evidence_plan,
       };
       
       set((state) => (

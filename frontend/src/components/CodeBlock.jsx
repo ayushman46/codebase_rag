@@ -9,7 +9,7 @@ import 'prismjs/components/prism-go';
 import 'prismjs/components/prism-rust';
 import 'prismjs/components/prism-sql';
 
-const CodeBlock = ({ code, language, file, startLine }) => {
+const CodeBlock = ({ code, language, file, startLine, retrievalReasons = [] }) => {
   useEffect(() => {
     Prism.highlightAll();
   }, [code]);
@@ -20,6 +20,11 @@ const CodeBlock = ({ code, language, file, startLine }) => {
         <span>{file} {startLine ? `: L${startLine}` : ''}</span>
         <span>{language}</span>
       </div>
+      {retrievalReasons.length > 0 && (
+        <p className="border-b border-charcoal bg-[#242424] px-4 pb-3 text-xs normal-case tracking-normal text-stone">
+          Why this file: {retrievalReasons.join('; ')}
+        </p>
+      )}
       <pre className="p-5 text-sm overflow-x-auto m-0 !bg-transparent font-mono leading-relaxed">
         <code className={`language-${language || 'javascript'}`}>
           {code}

@@ -53,6 +53,7 @@ const MessageBubble = ({ message }) => {
                     language={cit.language} 
                     file={cit.file_path}
                     startLine={cit.start_line}
+                    retrievalReasons={cit.retrieval_reasons}
                   />
                 ))}
               </div>

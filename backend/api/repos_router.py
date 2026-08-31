@@ -24,8 +24,13 @@ def now() -> str:
 
 async def owned_repo(store, user_id: str, repo_name: str):
     repo = await store.fetch_one(
-        "SELECT id, repo_name, github_url, status, chunk_count, error_message, created_at "
-        "FROM repos WHERE user_id = ? AND repo_name = ?",
+        "SELECT r.id, r.repo_name, r.github_url, r.status, r.chunk_count, r.error_message, r.created_at, "
+        "COALESCE(c.total_seen_files, 0) AS total_seen_files, COALESCE(c.eligible_files, 0) AS eligible_files, "
+        "COALESCE(c.indexed_files, 0) AS indexed_files, COALESCE(c.excluded_files, 0) AS excluded_files, "
+        "COALESCE(c.excluded_bytes, 0) AS excluded_bytes, COALESCE(c.excluded_reasons, '{}') AS excluded_reasons, "
+        "COALESCE(c.excluded_paths, '[]') AS excluded_paths "
+        "FROM repos r LEFT JOIN repo_coverage c ON c.repo_id = r.id "
+        "WHERE r.user_id = ? AND r.repo_name = ?",
         [user_id, repo_name],
     )
     if not repo:
@@ -38,7 +43,11 @@ async def get_status(repo_name: str, current_user=Depends(get_current_user)):
     try:
         await assert_turso_schema()
         repo = await owned_repo(get_turso_store(), current_user.id, repo_name)
-        return {key: repo[key] for key in ("status", "chunk_count", "error_message")}
+        return {key: repo[key] for key in (
+            "status", "chunk_count", "error_message", "total_seen_files", "eligible_files",
+            "indexed_files", "excluded_files", "excluded_bytes", "excluded_reasons",
+            "excluded_paths",
+        )}
     except HTTPException:
         raise
     except DatabaseConfigurationError as error:
@@ -53,8 +62,13 @@ async def list_repos(current_user=Depends(get_current_user)):
     try:
         await assert_turso_schema()
         return await get_turso_store().fetch_all(
-            "SELECT id, repo_name, github_url, status, chunk_count, created_at, error_message "
-            "FROM repos WHERE user_id = ? ORDER BY created_at DESC",
+            "SELECT r.id, r.repo_name, r.github_url, r.status, r.chunk_count, r.created_at, r.error_message, "
+            "COALESCE(c.total_seen_files, 0) AS total_seen_files, COALESCE(c.eligible_files, 0) AS eligible_files, "
+            "COALESCE(c.indexed_files, 0) AS indexed_files, COALESCE(c.excluded_files, 0) AS excluded_files, "
+            "COALESCE(c.excluded_bytes, 0) AS excluded_bytes, COALESCE(c.excluded_reasons, '{}') AS excluded_reasons, "
+            "COALESCE(c.excluded_paths, '[]') AS excluded_paths "
+            "FROM repos r LEFT JOIN repo_coverage c ON c.repo_id = r.id "
+            "WHERE r.user_id = ? ORDER BY r.created_at DESC",
             [current_user.id],
         )
     except DatabaseConfigurationError as error:
@@ -74,7 +88,7 @@ async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
             raise HTTPException(status_code=409, detail="Stop indexing before deleting this repository.")
         # Explicit deletes make cleanup reliable even if a Turso connection was
         # created without SQLite's per-connection foreign-key pragma.
-        for table in ("chat_messages", "ingestion_jobs", "kt_cache", "chunks"):
+        for table in ("chat_messages", "ingestion_jobs", "kt_cache", "repo_dependencies", "repo_files", "repo_coverage", "chunks"):
             await store.execute(f"DELETE FROM {table} WHERE repo_id = ?", [repo["id"]])
         await store.execute("DELETE FROM repos WHERE id = ? AND user_id = ?", [repo["id"], current_user.id])
     except HTTPException:
@@ -158,6 +172,9 @@ async def cancel_indexing(repo_name: str, current_user=Depends(get_current_user)
             raise HTTPException(status_code=409, detail="This repository finished indexing before it could be stopped.")
         await store.execute("DELETE FROM chunks WHERE repo_id = ?", [repo["id"]])
         await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo["id"]])
+        await store.execute("DELETE FROM repo_files WHERE repo_id = ?", [repo["id"]])
+        await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo["id"]])
+        await store.execute("DELETE FROM repo_coverage WHERE repo_id = ?", [repo["id"]])
         await store.execute(
             "UPDATE repos SET status = 'cancelled', chunk_count = 0, error_message = 'Indexing stopped by you.', "
             "updated_at = ? WHERE id = ? AND user_id = ?",

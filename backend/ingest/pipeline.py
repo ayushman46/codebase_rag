@@ -1,14 +1,25 @@
 """Durable Turso-backed repository ingestion pipeline."""
 
 import asyncio
+import hashlib
+import json
+import os
 import logging
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from config import settings
-from database import assert_turso_schema, explain_database_error, get_turso_store
+from database import Statement, assert_turso_schema, explain_database_error, get_turso_store
 from ingest.chunker import chunk_file
-from ingest.cloner import cleanup_repo, clone_repo_shallow, get_files_to_process, normalize_github_url, repository_name
+from ingest.cloner import (
+    cleanup_repo,
+    clone_repo_shallow,
+    get_file_selection_report,
+    normalize_github_url,
+    repository_name,
+    RepositoryValidationError,
+)
+from ingest.dependencies import build_dependency_manifest
 from ingest.embedder import EmbeddingUnavailableError, embed_chunks
 from ingest.summarizer import build_kt_cache
 
@@ -33,7 +44,12 @@ async def run_blocking(func, *args, **kwargs):
 
 
 async def ensure_repo_record(store, github_url: str, user_id: str):
-    """Create or reset a repository only for its authenticated owner."""
+    """Create or queue a repository only for its authenticated owner.
+
+    Existing chunks are intentionally retained until the worker has a fresh
+    clone. The worker compares file hashes and replaces only changed paths,
+    keeping a ready index available while a re-index waits in the queue.
+    """
     canonical_url = normalize_github_url(github_url)
     repo_name = repository_name(canonical_url)
     existing = await store.fetch_one(
@@ -44,10 +60,8 @@ async def ensure_repo_record(store, github_url: str, user_id: str):
         if existing["status"] in ACTIVE_REPOSITORY_STATUSES:
             raise IngestionConflictError("Repository ingestion is already in progress.")
         repo_id = existing["id"]
-        await store.execute("DELETE FROM chunks WHERE repo_id = ?", [repo_id])
-        await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo_id])
         await store.execute(
-            "UPDATE repos SET repo_name = ?, github_url = ?, status = 'queued', chunk_count = 0, "
+            "UPDATE repos SET repo_name = ?, github_url = ?, status = 'queued', "
             "error_message = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
             [repo_name, canonical_url, now, repo_id, user_id],
         )
@@ -221,6 +235,88 @@ async def get_repo_error_message(store, repo_id: str) -> str | None:
     return result.get("error_message") if result else None
 
 
+async def persist_coverage(store, repo_id: str, report: dict, indexed_files: int = 0) -> None:
+    """Persist bounded, explainable ingestion coverage for the repository UI."""
+    await store.execute(
+        "INSERT INTO repo_coverage (repo_id, total_seen_files, eligible_files, indexed_files, "
+        "excluded_files, excluded_bytes, excluded_reasons, excluded_paths, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET total_seen_files = excluded.total_seen_files, "
+        "eligible_files = excluded.eligible_files, indexed_files = excluded.indexed_files, "
+        "excluded_files = excluded.excluded_files, excluded_bytes = excluded.excluded_bytes, "
+        "excluded_reasons = excluded.excluded_reasons, excluded_paths = excluded.excluded_paths, updated_at = excluded.updated_at",
+        [
+            repo_id,
+            int(report.get("total_seen_files", 0)),
+            int(report.get("eligible_files", 0)),
+            int(indexed_files),
+            int(report.get("excluded_files", 0)),
+            int(report.get("excluded_bytes", 0)),
+            json.dumps(report.get("excluded_reasons") or {}),
+            json.dumps(report.get("excluded_paths") or []),
+            timestamp(),
+        ],
+    )
+
+
+def build_file_manifest(files: list[str], repo_path: str) -> dict[str, dict[str, int | str]]:
+    """Hash selected source files for deterministic incremental re-indexing."""
+    manifest: dict[str, dict[str, int | str]] = {}
+    for file_path in files:
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        relative = os.path.relpath(file_path, repo_path).replace(os.sep, "/")
+        manifest[relative] = {"content_hash": digest.hexdigest(), "byte_size": os.path.getsize(file_path)}
+    return manifest
+
+
+async def replace_changed_file_chunks(store, repo_id: str, changed_paths: set[str], removed_paths: set[str]) -> None:
+    """Remove only stale chunks before new versions are inserted."""
+    stale_paths = sorted(changed_paths | removed_paths)
+    if not stale_paths:
+        return
+    placeholders = ", ".join("?" for _ in stale_paths)
+    await store.execute(
+        f"DELETE FROM chunks WHERE repo_id = ? AND file_path IN ({placeholders})",
+        [repo_id, *stale_paths],
+    )
+    if removed_paths:
+        placeholders = ", ".join("?" for _ in removed_paths)
+        await store.execute(
+            f"DELETE FROM repo_files WHERE repo_id = ? AND file_path IN ({placeholders})",
+            [repo_id, *sorted(removed_paths)],
+        )
+
+
+async def persist_file_manifest(store, repo_id: str, manifest: dict[str, dict[str, int | str]]) -> None:
+    statements = []
+    for file_path, metadata in manifest.items():
+        statements.append(Statement(
+            "INSERT INTO repo_files (repo_id, file_path, content_hash, byte_size, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(repo_id, file_path) DO UPDATE SET content_hash = excluded.content_hash, "
+            "byte_size = excluded.byte_size, updated_at = excluded.updated_at",
+            [repo_id, file_path, metadata["content_hash"], metadata["byte_size"], timestamp()],
+        ))
+    if statements:
+        await store.batch(statements)
+
+
+async def persist_dependency_manifest(store, repo_id: str, dependencies: list[dict]) -> None:
+    """Replace the small resolved dependency graph after a successful index."""
+    await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo_id])
+    statements = [
+        Statement(
+            "INSERT OR IGNORE INTO repo_dependencies (repo_id, source_file, target_file, import_name, line_number) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [repo_id, edge["source_file"], edge["target_file"], edge["import_name"], edge["line_number"]],
+        )
+        for edge in dependencies
+    ]
+    if statements:
+        await store.batch(statements)
+
+
 async def finalize_successful_job(store, job: dict) -> bool:
     """Publish ready only if the same worker still owns the queue lease.
 
@@ -309,46 +405,77 @@ async def run_ingestion_for_repo(
             repo_id, _ = await ensure_repo_record(store, canonical_url, user_id)
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
-        # Do not destroy a previously-ready index while a re-index is merely
-        # queued. Once this worker owns the job, clear its old derived data so
-        # retries cannot leave duplicate chunks behind.
-        await store.execute("DELETE FROM chunks WHERE repo_id = ?", [repo_id])
-        await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo_id])
-        await update_repo(store, repo_id, status="cloning", error_message=None, chunk_count=0)
+        # Keep the previous ready index available while a fresh clone is being
+        # prepared. Only stale file paths are replaced after the clone passes
+        # validation, so a failed re-index does not erase working evidence.
+        await update_repo(store, repo_id, status="cloning", error_message=None)
         repo_path = await run_blocking(clone_repo_shallow, canonical_url)
 
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
         await update_repo(store, repo_id, status="chunking")
-        files = await run_blocking(get_files_to_process, repo_path)
+        selection_report = await run_blocking(get_file_selection_report, repo_path)
+        await persist_coverage(store, repo_id, selection_report)
+        files = selection_report["files"]
         if not files:
             raise ValueError("No supported text source files were found in this repository.")
+
+        manifest = await run_blocking(build_file_manifest, files, repo_path)
+        dependencies = await run_blocking(build_dependency_manifest, files, repo_path)
+        previous_rows = await store.fetch_all(
+            "SELECT file_path, content_hash FROM repo_files WHERE repo_id = ?", [repo_id]
+        )
+        previous_manifest = {row["file_path"]: row["content_hash"] for row in previous_rows}
+        changed_paths = {
+            path for path, metadata in manifest.items()
+            if previous_manifest.get(path) != metadata["content_hash"]
+        }
+        removed_paths = set(previous_manifest) - set(manifest)
+        await replace_changed_file_chunks(store, repo_id, changed_paths, removed_paths)
 
         def collect_chunks():
             chunks = []
             for file_path in files:
+                relative = os.path.relpath(file_path, repo_path).replace(os.sep, "/")
+                if relative not in changed_paths:
+                    continue
                 chunks.extend(chunk_file(file_path, repo_path))
                 if len(chunks) > settings.max_repository_chunks:
                     raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
             return chunks
 
         all_chunks = await run_blocking(collect_chunks)
-        if not all_chunks:
+        chunked_paths = {chunk["file_path"] for chunk in all_chunks}
+        chunking_failed_paths = sorted(changed_paths - chunked_paths)
+        if chunking_failed_paths:
+            reasons = dict(selection_report.get("excluded_reasons") or {})
+            reasons["chunking_failed"] = int(reasons.get("chunking_failed", 0)) + len(chunking_failed_paths)
+            selection_report["excluded_reasons"] = reasons
+            selection_report["excluded_files"] = int(selection_report.get("excluded_files", 0)) + len(chunking_failed_paths)
+            selection_report["excluded_paths"] = sorted({
+                *selection_report.get("excluded_paths", []), *chunking_failed_paths,
+            })
+        existing_count = await get_repo_chunk_count(store, repo_id)
+        if existing_count + len(all_chunks) > settings.max_repository_chunks:
+            raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
+        if not all_chunks and existing_count == 0:
             raise ValueError("No readable source code chunks were created from this repository.")
 
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
         await update_repo(store, repo_id, status="embedding")
         semantic_index_warning = None
-        try:
-            embedded_chunks = await embed_repository_chunks(store, repo_id, all_chunks, job_id, claim_token)
-        except EmbeddingUnavailableError as error:
-            logger.warning("NVIDIA embeddings unavailable for %s; using keyword retrieval: %s", repo_id, error)
-            semantic_index_warning = (
-                "NVIDIA semantic embeddings are temporarily unavailable. "
-                "This repository is ready with keyword retrieval; re-index later to restore semantic search."
-            )
-            embedded_chunks = [{**chunk, "embedding": None} for chunk in all_chunks]
+        embedded_chunks = []
+        if all_chunks:
+            try:
+                embedded_chunks = await embed_repository_chunks(store, repo_id, all_chunks, job_id, claim_token)
+            except EmbeddingUnavailableError as error:
+                logger.warning("NVIDIA embeddings unavailable for %s; using keyword retrieval: %s", repo_id, error)
+                semantic_index_warning = (
+                    "NVIDIA semantic embeddings are temporarily unavailable. "
+                    "This repository is ready with keyword retrieval; re-index later to restore semantic search."
+                )
+                embedded_chunks = [{**chunk, "embedding": None} for chunk in all_chunks]
 
         for offset in range(0, len(embedded_chunks), 100):
             await raise_if_ingestion_cancelled(store, repo_id, claim_token)
@@ -364,26 +491,42 @@ async def run_ingestion_for_repo(
             ]
             await store.insert_chunks(records)
 
+        await persist_file_manifest(store, repo_id, manifest)
+        await persist_dependency_manifest(store, repo_id, dependencies)
+        indexed_count = await store.fetch_one(
+            "SELECT COUNT(DISTINCT file_path) AS count FROM chunks WHERE repo_id = ?", [repo_id]
+        )
+        indexed_file_count = int((indexed_count or {}).get("count", 0))
+        await persist_coverage(store, repo_id, selection_report, indexed_file_count)
+
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
         await update_repo(store, repo_id, status="summarizing")
-        await build_kt_cache(store, repo_id, embedded_chunks)
+        indexed_chunks = await store.fetch_all(
+            "SELECT file_path, start_line, end_line, language, symbols, content FROM chunks "
+            "WHERE repo_id = ? ORDER BY file_path, start_line", [repo_id]
+        )
+        await build_kt_cache(store, repo_id, indexed_chunks)
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         if job_id and claim_token:
             if semantic_index_warning:
                 await update_repo(store, repo_id, error_message=semantic_index_warning)
             return True
-        await update_repo(store, repo_id, status="ready", chunk_count=len(embedded_chunks), error_message=semantic_index_warning)
+        await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message=semantic_index_warning)
         return True
     except IngestionCancelledError:
         logger.info("Repository ingestion cancelled for %s", repo_id)
         if repo_id:
             await store.execute("DELETE FROM chunks WHERE repo_id = ?", [repo_id])
             await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo_id])
+            await store.execute("DELETE FROM repo_files WHERE repo_id = ?", [repo_id])
+            await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo_id])
+            await store.execute("DELETE FROM repo_coverage WHERE repo_id = ?", [repo_id])
             await update_repo(store, repo_id, status="cancelled", chunk_count=0, error_message="Indexing stopped by you.")
         return False
     except Exception as error:
-        error_message = explain_database_error(error)
+        error_message = str(error).strip() if isinstance(error, (ValueError, RepositoryValidationError)) else explain_database_error(error)
+        error_message = error_message or "Repository ingestion could not be completed."
         if error_message != "The database could not complete that request. Please try again shortly.":
             logger.warning("Repository ingestion stopped: %s", error_message)
         else:
