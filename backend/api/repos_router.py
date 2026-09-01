@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
 from database import DatabaseConfigurationError, assert_turso_schema, explain_database_error, get_turso_store
-from ingest.pipeline import ACTIVE_REPOSITORY_STATUSES, IngestionConflictError, enqueue_ingestion_job, enforce_ingestion_capacity, ensure_repo_record
+from ingest.pipeline import ACTIVE_REPOSITORY_STATUSES, IngestionConflictError, enforce_ingestion_capacity, ensure_repo_record, queue_existing_repo
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -140,8 +140,7 @@ async def reindex_repository(repo_name: str, current_user=Depends(get_current_us
         store = get_turso_store()
         existing = await owned_repo(store, current_user.id, repo_name)
         await enforce_ingestion_capacity(store, current_user.id, existing["github_url"])
-        repo_id, normalized_name = await ensure_repo_record(store, existing["github_url"], current_user.id)
-        await enqueue_ingestion_job(store, existing["github_url"], current_user.id, repo_id)
+        _repo_id, normalized_name = await queue_existing_repo(store, existing, current_user.id)
     except HTTPException:
         raise
     except IngestionConflictError as error:

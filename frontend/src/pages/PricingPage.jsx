@@ -1,6 +1,7 @@
 import { Check } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import GoogleSignInButton from '../components/GoogleSignInButton';
+import RazorpayCheckoutButton from '../components/RazorpayCheckoutButton';
 import useStore from '../store/useStore';
 
 const plans = [
@@ -9,16 +10,14 @@ const plans = [
     availability: 'Available now',
     price: 'Free',
     detail: 'Everything you need to evaluate a repository and learn the workflow.',
-    action: 'Get started',
     features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations'],
   },
   {
     name: 'Team',
-    availability: 'In development',
-    price: 'Coming soon',
-    detail: 'A shared codebase discovery workflow for growing engineering teams.',
-    action: 'Read the roadmap',
-    features: ['Everything in Explorer', 'Shared workspace controls', 'Higher indexing capacity', 'Priority support'],
+    availability: 'Available now',
+    price: '₹300 / month',
+    detail: 'More room for multiple repositories and a higher cumulative indexing limit for your workspace.',
+    features: ['Everything in Explorer', 'Up to 5 GB across your workspace', 'Higher indexing capacity', 'Priority support'],
   },
 ];
 
@@ -29,7 +28,7 @@ const PricingPage = () => {
       <div className="mx-auto max-w-2xl text-center">
         <span className="text-caption font-semibold uppercase tracking-widest text-ember-orange">Pricing</span>
         <h1 className="heading-lg page-title mt-5 text-ink-black">Choose the right place to start.</h1>
-        <p className="mt-5 text-lg leading-relaxed text-pewter">Begin with a private workspace today. Team controls are on their way for engineering organizations that need to explore code together.</p>
+        <p className="mt-5 text-lg leading-relaxed text-pewter">Begin with a private workspace today, then expand your indexed source capacity when your projects grow.</p>
       </div>
       <div className="mx-auto mt-12 grid max-w-5xl gap-5 md:mt-16 md:grid-cols-2 md:gap-6">
         {plans.map((plan) => (
@@ -43,9 +42,11 @@ const PricingPage = () => {
             <div className="mt-9">
               {plan.name === 'Explorer' && !user ? (
                 <GoogleSignInButton className="w-full justify-center" />
+              ) : plan.name === 'Team' ? (
+                <RazorpayCheckoutButton />
               ) : (
-                <Link to={user && plan.name === 'Explorer' ? '/app' : '/docs'} className="inline-flex w-full justify-center rounded-full bg-ink-black px-5 py-3 text-sm font-semibold text-pure-white transition hover:bg-charcoal">
-                  {user && plan.name === 'Explorer' ? 'Open workspace' : plan.action}
+                <Link to="/app" className="inline-flex w-full justify-center rounded-full bg-ink-black px-5 py-3 text-sm font-semibold text-pure-white transition hover:bg-charcoal">
+                  Open workspace
                 </Link>
               )}
             </div>

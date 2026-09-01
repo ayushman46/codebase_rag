@@ -59,6 +59,47 @@ class BackendSmokeTests(unittest.TestCase):
             row = asyncio.run(run())
         self.assertEqual(row, {"id": "one", "symbols": ["login"]})
 
+    def test_turso_store_reconnects_after_expired_hrana_stream(self):
+        from database import TursoStore
+
+        class Cursor:
+            description = [("value",)]
+            rowcount = 1
+
+            def fetchall(self):
+                return [("recovered",)]
+
+        class StaleClient:
+            def __init__(self):
+                self.closed = False
+
+            def execute(self, _sql, _args):
+                raise ValueError("Hrana: api error: status=404 Not Found, body={stream not found}")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        class FreshClient:
+            def execute(self, _sql, _args):
+                return Cursor()
+
+            def commit(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TursoStore(f"file:{Path(tmp) / 'test.db'}", "local-test-token")
+            stale = StaleClient()
+            fresh = FreshClient()
+            store._client = stale
+            store._connect_sync = lambda: fresh
+            row = asyncio.run(store.fetch_one("SELECT 1"))
+
+        self.assertEqual(row, {"value": "recovered"})
+        self.assertTrue(stale.closed)
+
     def test_turso_chunk_insert_supports_keyword_only_fallback(self):
         from database import TursoStore
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,6 +193,22 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual((repo_id, name), ("repo-1", "Hello-World"))
         self.assertNotIn("DELETE FROM chunks", " ".join(sql for sql, _ in store.executed))
         self.assertTrue(all("user-1" in args for _, args in store.executed if args and "repos" in _))
+
+    def test_reindex_preserves_a_renamed_repository_row(self):
+        from ingest.pipeline import queue_existing_repo
+
+        store = MemoryStore()
+        renamed = {
+            "id": "repo-1",
+            "repo_name": "My renamed workspace",
+            "github_url": "https://github.com/octocat/Hello-World.git",
+        }
+        repo_id, repo_name = asyncio.run(queue_existing_repo(store, renamed, "user-1"))
+
+        self.assertEqual((repo_id, repo_name), ("repo-1", "My renamed workspace"))
+        self.assertTrue(any("UPDATE repos SET status" in sql for sql, _ in store.executed))
+        self.assertTrue(any("INSERT INTO ingestion_jobs" in sql for sql, _ in store.executed))
+        self.assertFalse(any("INSERT INTO repos" in sql for sql, _ in store.executed))
 
     def test_file_selection_report_discloses_exclusion_reasons(self):
         with tempfile.TemporaryDirectory() as tmp:

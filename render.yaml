@@ -25,6 +25,20 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: VITE_RAZORPAY_KEY_ID
+        sync: false
+      - key: TEAM_PLAN_AMOUNT_PAISE
+        value: "30000"
+      - key: TEAM_PLAN_DURATION_DAYS
+        value: "30"
+      - key: FREE_CODEBASE_BYTES
+        value: "500000000"
+      - key: TEAM_CODEBASE_BYTES
+        value: "5000000000"
       - key: NVIDIA_API_KEY
         sync: false
       - key: NVIDIA_BASE_URL

@@ -39,6 +39,12 @@ This version replaces the previous Supabase/Postgres data layer. Existing Supaba
    turso db shell codebase-intel < turso/01_trust_features.sql
    ```
 
+   Apply the billing and account-quota tables after the trust migration:
+
+   ```bash
+   turso db shell codebase-intel < turso/02_billing.sql
+   ```
+
 4. Copy the database URL and create a write-capable application token:
 
    ```bash
@@ -76,9 +82,19 @@ SUPABASE_KEY=
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
 
+# Server only: Razorpay Team checkout. The secret must never be exposed to Vite.
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+TEAM_PLAN_AMOUNT_PAISE=30000
+TEAM_PLAN_DURATION_DAYS=30
+FREE_CODEBASE_BYTES=500000000
+TEAM_CODEBASE_BYTES=5000000000
+
 # Browser-safe Supabase settings.
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
+# Browser-safe Razorpay checkout key (public key only).
+VITE_RAZORPAY_KEY_ID=
 VITE_API_BASE_URL=http://localhost:8000/api
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
@@ -115,6 +131,19 @@ The FastAPI process starts a durable ingestion worker by default. It atomically 
 8. A failed embedding service does not discard usable source: the repository becomes ready with keyword retrieval and a clear status note.
 
 Repository limits are configurable. Defaults allow up to 5,000 files, 25 MB total source, 5 MB per individual source file, and 1,500 chunks per repository.
+
+Each account also has a cumulative indexed-source quota. Explorer accounts have
+500 MB across all repositories. The Team checkout is ₹300 for one month and
+activates a configurable 5 GB quota after the server verifies the Razorpay
+signature. Usage is shown only on the signed-in Account page; deleting a
+repository releases its indexed bytes.
+
+The current integration uses Razorpay Standard Checkout for the Team payment
+and activates the entitlement only after server-side verification. Each
+verified payment grants 30 days of Team access; it does not automatically
+renew. Automatic recurring billing requires a separate Razorpay Subscriptions
+plan and webhook flow. This checkout never grants access from a client-side
+success callback alone.
 
 The repository list reports coverage as indexed files versus eligible source
 files and records omission reasons and paths for hidden files, lockfiles,
@@ -163,6 +192,9 @@ In Render, provide these secret environment variables:
 - `SUPABASE_KEY`
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN`
+- `RAZORPAY_KEY_ID`
+- `RAZORPAY_KEY_SECRET`
+- `VITE_RAZORPAY_KEY_ID` (public checkout key; safe for the browser)
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
 - `CORS_ORIGINS` set to the final `https://YOUR-SERVICE.onrender.com` origin
@@ -184,6 +216,9 @@ All endpoints require a valid Supabase bearer token except `/api/health`.
 | `POST /api/repos/{repo_name}/cancel-indexing` | Stop active indexing and remove partial chunks. |
 | `PATCH /api/repos/{repo_name}` | Rename an owned workspace. |
 | `DELETE /api/repos/{repo_name}` | Delete an owned workspace and related data. |
+| `GET /api/account/usage` | Show the signed-in account's indexed-source usage and quota. |
+| `POST /api/create-order` | Create or reuse the authenticated user's Team Razorpay order. |
+| `POST /api/verify-payment` | Verify the Razorpay signature and activate the Team entitlement. |
 
 ## Verification
 

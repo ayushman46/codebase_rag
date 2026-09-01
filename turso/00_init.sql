@@ -146,3 +146,30 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS chat_messages_by_repo_user ON chat_messages(repo_id, user_id, created_at, id);
+
+-- Account plan and quota state. Supabase user ids are stored as opaque text;
+-- identity is still validated by Supabase on every API request.
+CREATE TABLE IF NOT EXISTS account_entitlements (
+  user_id TEXT PRIMARY KEY,
+  plan TEXT NOT NULL DEFAULT 'explorer' CHECK (plan IN ('explorer', 'team')),
+  quota_bytes INTEGER NOT NULL DEFAULT 500000000 CHECK (quota_bytes > 0),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'past_due', 'cancelled')),
+  razorpay_order_id TEXT,
+  razorpay_payment_id TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS billing_orders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  plan TEXT NOT NULL CHECK (plan = 'team'),
+  razorpay_order_id TEXT NOT NULL UNIQUE,
+  amount INTEGER NOT NULL CHECK (amount >= 100),
+  currency TEXT NOT NULL DEFAULT 'INR',
+  status TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created', 'paid', 'failed')),
+  razorpay_payment_id TEXT UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS billing_orders_user_status ON billing_orders(user_id, status, created_at);

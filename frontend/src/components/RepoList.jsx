@@ -170,11 +170,12 @@ const RepoList = () => {
                       <button
                         type="button"
                         onClick={() => setOpenMenuId((id) => (id === repo.id ? null : repo.id))}
-                        className="rounded-full p-1.5 text-warm-gray transition-colors hover:bg-warm-canvas hover:text-ink-black"
+                        className="rounded-full p-2 text-warm-gray transition-colors hover:bg-warm-canvas hover:text-ink-black"
                         aria-label={`Repository actions for ${repo.repo_name}`}
+                        aria-haspopup="menu"
                         aria-expanded={openMenuId === repo.id}
                       >
-                        <Ellipsis className="h-4 w-4" aria-hidden="true" />
+                        <Ellipsis className="h-5 w-5" aria-hidden="true" />
                       </button>
                       {openMenuId === repo.id && (
                         <div role="menu" className="absolute right-0 top-8 z-10 w-36 border border-sand bg-pure-white py-1 text-sm shadow-lg">

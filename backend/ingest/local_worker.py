@@ -19,6 +19,7 @@ async def process_queue_forever():
     """Claim one queued job at a time without blocking FastAPI request handling."""
     logger.info("Local ingestion worker started; polling every %s seconds", settings.local_ingestion_poll_seconds)
     poll_count = 0
+    failure_streak = 0
 
     while True:
         try:
@@ -32,6 +33,7 @@ async def process_queue_forever():
                 if recovered:
                     logger.info("Recovery sweep restored %d stuck repository(ies)", recovered)
             result = await process_one_queued_ingestion(get_turso_store())
+            failure_streak = 0
             # Continue immediately while work is available; otherwise avoid
             # repeatedly querying Turso when the queue is empty.
             delay = 0 if result.get("processed") else settings.local_ingestion_poll_seconds
@@ -40,6 +42,12 @@ async def process_queue_forever():
             raise
         except Exception:
             logger.exception("Local ingestion worker could not process the queue; retrying")
-            delay = max(settings.local_ingestion_poll_seconds, 3.0)
+            failure_streak += 1
+            # A provider/database outage should not fill logs every few
+            # seconds. The delay resets as soon as one poll succeeds.
+            delay = max(
+                settings.local_ingestion_poll_seconds,
+                min(30.0, 3.0 * (2 ** min(failure_streak - 1, 3))),
+            )
 
         await asyncio.sleep(delay)

@@ -22,6 +22,7 @@ from ingest.cloner import (
 from ingest.dependencies import build_dependency_manifest
 from ingest.embedder import EmbeddingUnavailableError, embed_chunks
 from ingest.summarizer import build_kt_cache
+from quota import ensure_repository_usage_capacity
 
 logger = logging.getLogger(__name__)
 ACTIVE_REPOSITORY_STATUSES = {"queued", "cloning", "chunking", "embedding", "summarizing"}
@@ -72,6 +73,27 @@ async def ensure_repo_record(store, github_url: str, user_id: str):
             "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?)",
             [repo_id, user_id, repo_name, canonical_url, now, now],
         )
+    return repo_id, repo_name
+
+
+async def queue_existing_repo(store, repo: dict, user_id: str) -> tuple[str, str]:
+    """Queue a known repository without rebuilding its user-facing name.
+
+    Repository names are editable labels. Re-indexing must therefore use the
+    existing row id and label rather than calling ``ensure_repo_record`` with
+    the GitHub URL (which derives the original upstream name and can create a
+    duplicate row after a rename).
+    """
+    repo_id = str(repo["id"])
+    repo_name = str(repo["repo_name"])
+    canonical_url = normalize_github_url(str(repo["github_url"]))
+    now = timestamp()
+    await store.execute(
+        "UPDATE repos SET status = 'queued', error_message = NULL, updated_at = ? "
+        "WHERE id = ? AND user_id = ?",
+        [now, repo_id, user_id],
+    )
+    await enqueue_ingestion_job(store, canonical_url, user_id, repo_id)
     return repo_id, repo_name
 
 
@@ -419,6 +441,16 @@ async def run_ingestion_for_repo(
         files = selection_report["files"]
         if not files:
             raise ValueError("No supported text source files were found in this repository.")
+
+        # Enforce the account quota after the clone has been inspected but
+        # before replacing any existing chunks. A re-index excludes the old
+        # version of this repository from the projection calculation.
+        await ensure_repository_usage_capacity(
+            store,
+            user_id,
+            selection_report.get("eligible_bytes", 0),
+            replacing_repo_id=repo_id,
+        )
 
         manifest = await run_blocking(build_file_manifest, files, repo_path)
         dependencies = await run_blocking(build_dependency_manifest, files, repo_path)

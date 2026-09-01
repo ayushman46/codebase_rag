@@ -11,6 +11,7 @@ from config import get_cors_origins, should_run_local_ingestion_worker
 from api.ingest_router import router as ingest_router
 from api.query_router import router as query_router
 from api.repos_router import router as repos_router
+from api.billing_router import router as billing_router
 from ingest.local_worker import process_queue_forever
 
 
@@ -52,6 +53,7 @@ app.add_middleware(
 app.include_router(ingest_router, prefix="/api")
 app.include_router(query_router, prefix="/api")
 app.include_router(repos_router, prefix="/api")
+app.include_router(billing_router, prefix="/api")
 
 
 @app.middleware("http")
@@ -61,8 +63,10 @@ async def add_security_headers(request: Request, call_next):
     # for OAuth/session traffic and remote HTTPS avatars are permitted.
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; connect-src 'self' https://*.supabase.co; "
-        "img-src 'self' https: data:; style-src 'self'; script-src 'self'; "
+        "default-src 'self'; connect-src 'self' https://*.supabase.co https://checkout.razorpay.com https://api.razorpay.com; "
+        "img-src 'self' https: data:; style-src 'self'; "
+        "script-src 'self' https://checkout.razorpay.com; "
+        "frame-src https://checkout.razorpay.com https://api.razorpay.com; "
         "base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
     )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")

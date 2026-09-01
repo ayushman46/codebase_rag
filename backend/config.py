@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     # stored through this server-only Turso connection.
     turso_database_url: str = ""
     turso_auth_token: str = ""
+    # Billing is server-only. The public Razorpay key is exposed separately
+    # through VITE_RAZORPAY_KEY_ID for the checkout widget.
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    team_plan_amount_paise: int = 30_000
+    team_plan_duration_days: int = 30
+    # Explorer quota is cumulative indexed source across a user's repositories.
+    free_codebase_bytes: int = 500_000_000
+    # Team quota is configurable and deliberately finite; do not imply unlimited storage.
+    team_codebase_bytes: int = 5_000_000_000
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # Protect the service from excessively large repository ingestion jobs.
     max_repository_files: int = 5_000

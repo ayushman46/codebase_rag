@@ -26,3 +26,6 @@ export const deleteRepository = (repo_name) => api.delete(`/repos/${encodeURICom
 export const getStatus = (repo_name) => api.get(`/status/${encodeURIComponent(repo_name)}`);
 export const cancelIndexing = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/cancel-indexing`);
 export const reindexRepository = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/reindex`);
+export const getAccountUsage = () => api.get('/account/usage');
+export const createTeamOrder = () => api.post('/create-order', { plan: 'team' });
+export const verifyTeamPayment = (payment) => api.post('/verify-payment', payment);

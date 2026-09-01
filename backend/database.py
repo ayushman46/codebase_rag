@@ -24,6 +24,10 @@ class DatabaseConfigurationError(RuntimeError):
     """Raised when a required database service is unavailable or unconfigured."""
 
 
+class DatabaseUnavailableError(DatabaseConfigurationError):
+    """Raised after a bounded retry confirms the Turso connection is stale."""
+
+
 class DeferredSupabaseClient:
     def __init__(self, message: str):
         self.message = message
@@ -74,8 +78,17 @@ class TursoStore:
     """
 
     def __init__(self, url: str, auth_token: str):
-        self._client = libsql.connect(database=url, auth_token=auth_token, _check_same_thread=False)
+        self._database_url = url
+        self._auth_token = auth_token
+        self._client = self._connect_sync()
         self._lock = asyncio.Lock()
+
+    def _connect_sync(self):
+        return libsql.connect(
+            database=self._database_url,
+            auth_token=self._auth_token,
+            _check_same_thread=False,
+        )
 
     @staticmethod
     def _row_to_dict(columns: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
@@ -105,8 +118,23 @@ class TursoStore:
                 async with self._lock:
                     return await asyncio.to_thread(self._execute_sync, sql, arguments)
             except Exception as error:
-                if attempt == attempts - 1 or not self._is_transient_error(error):
+                if not self._is_transient_error(error):
                     raise
+                # Hrana streams can expire while a process remains alive. A
+                # retry against the same client repeats the dead stream, so
+                # replace it before retrying. Writes are deliberately not
+                # retried (they may have committed before the transport
+                # failed), but refreshing here lets the next request recover.
+                try:
+                    await self._refresh_connection()
+                except Exception as reconnect_error:
+                    raise DatabaseUnavailableError(
+                        "Turso connection was lost and could not be restored. Please retry shortly."
+                    ) from reconnect_error
+                if attempt == attempts - 1:
+                    raise DatabaseUnavailableError(
+                        "Turso connection was lost while processing the request. Please retry shortly."
+                    ) from error
                 await asyncio.sleep(self._retry_delay(attempt))
 
         raise RuntimeError("Turso retry loop ended unexpectedly.")  # pragma: no cover
@@ -121,7 +149,7 @@ class TursoStore:
         return any(marker in message for marker in (
             "database is locked", "database is busy", "busy", "timeout", "timed out",
             "connection", "temporarily unavailable", "http 429", "http 500", "http 502",
-            "http 503", "http 504",
+            "http 503", "http 504", "stream not found", "broken pipe", "connection reset",
         ))
 
     @staticmethod
@@ -135,6 +163,16 @@ class TursoStore:
         affected = cursor.rowcount if cursor.rowcount >= 0 else len(rows)
         self._client.commit()
         return QueryResult(rows=rows, rows_affected=affected)
+
+    async def _refresh_connection(self) -> None:
+        """Close a dead Hrana client and establish a fresh stream safely."""
+        async with self._lock:
+            old_client = self._client
+            try:
+                await asyncio.to_thread(old_client.close)
+            except Exception:
+                logger.debug("Ignoring failure while closing stale Turso client", exc_info=True)
+            self._client = await asyncio.to_thread(self._connect_sync)
 
     async def batch(self, statements: Iterable[Statement]) -> None:
         """Run an idempotent batch with bounded recovery for transient outages.
@@ -155,8 +193,18 @@ class TursoStore:
                     await asyncio.to_thread(self._batch_sync, grouped)
                 return
             except Exception as error:
-                if attempt == 2 or not self._is_transient_error(error):
+                if not self._is_transient_error(error):
                     raise
+                try:
+                    await self._refresh_connection()
+                except Exception as reconnect_error:
+                    raise DatabaseUnavailableError(
+                        "Turso connection was lost and could not be restored. Please retry shortly."
+                    ) from reconnect_error
+                if attempt == 2:
+                    raise DatabaseUnavailableError(
+                        "Turso connection was lost while writing. Please retry shortly."
+                    ) from error
                 await asyncio.sleep(self._retry_delay(attempt))
 
     def _batch_sync(self, grouped: dict[str, list[list[Any]]]) -> None:
@@ -227,13 +275,16 @@ async def assert_turso_schema() -> None:
             return
         try:
             store = get_turso_store()
-            for table in ("repos", "chunks", "repo_files", "repo_dependencies", "repo_coverage", "ingestion_jobs", "chat_messages", "kt_cache"):
+            for table in (
+                "repos", "chunks", "repo_files", "repo_dependencies", "repo_coverage",
+                "ingestion_jobs", "chat_messages", "kt_cache", "account_entitlements", "billing_orders",
+            ):
                 await store.execute(f"SELECT 1 FROM {table} LIMIT 1")
         except DatabaseConfigurationError:
             raise
         except Exception as error:
             raise DatabaseConfigurationError(
-                "Turso schema is not initialized or is unavailable. Run turso/00_init.sql in the Turso SQL shell, "
+                "Turso schema is not initialized or is unavailable. Run turso/00_init.sql and turso/02_billing.sql in the Turso SQL shell, "
                 "then restart the backend."
             ) from error
         _turso_schema_verified = True

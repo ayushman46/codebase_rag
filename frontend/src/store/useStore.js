@@ -24,7 +24,7 @@ const useStore = create((set, get) => ({
       set({
         authError: 'Google sign-in is unavailable because Supabase environment variables are missing.',
       });
-      return;
+      return false;
     }
 
     set({ isSigningIn: true, authError: null });
@@ -36,9 +36,11 @@ const useStore = create((set, get) => ({
         }
       });
       if (error) throw error;
+      return true;
     } catch (e) {
       console.error("Sign-in error:", e);
       set({ authError: e.message || 'Google sign-in could not be started. Please try again.' });
+      return false;
     } finally {
       set({ isSigningIn: false });
     }
