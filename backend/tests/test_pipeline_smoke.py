@@ -258,6 +258,19 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertNotIn("does", terms)
         self.assertNotIn("the", terms)
 
+    def test_targeted_topics_use_query_hints_and_boundary_matching(self):
+        from retrieval.retriever import build_evidence_plan, is_strict_target_question, path_matches_hints
+
+        indexing_plan = build_evidence_plan("How does repository indexing work?")
+        self.assertEqual(indexing_plan["query_scope"], "targeted_topic")
+        self.assertIn("pipeline", indexing_plan["path_hints"])
+        self.assertTrue(is_strict_target_question("How does authentication work?", []))
+        self.assertTrue(path_matches_hints("backend/api/routes.py", ["route"]))
+        self.assertFalse(path_matches_hints("backend/capillary.py", ["api"]))
+        # Documentation questions intentionally retain access to README/docs
+        # evidence instead of being forced through an implementation-only set.
+        self.assertFalse(is_strict_target_question("Show the API docs", [], include_overview_files=True))
+
     def test_dependency_manifest_resolves_only_local_imports(self):
         from ingest.dependencies import build_dependency_manifest
         with tempfile.TemporaryDirectory() as tmp:

@@ -62,11 +62,15 @@ QUESTION_PATH_HINTS = (
     (re.compile(r"\b(?:sidebar|side\s*bar)\b", re.IGNORECASE), ("sidebar", "side-bar")),
     (re.compile(r"\b(?:chat|conversation|message)\b", re.IGNORECASE), ("chat", "conversation", "message")),
     (re.compile(r"\b(?:authentication|authorization|sign[ -]?in|login|oauth)\b", re.IGNORECASE),
-     ("auth", "login", "signin", "oauth", "session")),
+     ("auth", "login", "signin", "oauth", "session", "security", "middleware", "route", "router", "api", "main", "app", "config")),
     (re.compile(r"\b(?:api|apis|endpoint|endpoints|route|routes|router|routers|handler|handlers|rest|request|requests)\b", re.IGNORECASE),
-     ("api", "apis", "endpoint", "endpoints", "route", "routes", "router", "routers", "handler", "handlers", "server", "backend", "main", "app")),
+     ("api", "apis", "endpoint", "endpoints", "route", "routes", "router", "routers", "handler", "handlers", "server", "main", "app")),
     (re.compile(r"\b(?:database|databases|db|schema|sql|query|queries|migration|migrations)\b", re.IGNORECASE),
      ("database", "db", "schema", "sql", "migration", "migrations", "model", "models", "repository")),
+    (re.compile(r"\b(?:index|indexing|ingest|ingestion|clone|cloning|chunk|chunking|embed|embedding|worker|queue|summar(?:y|ize|izer)|manifest)\b", re.IGNORECASE),
+     ("index", "indexing", "ingest", "ingestion", "clone", "cloning", "pipeline", "chunk", "chunker", "embed", "embedder", "embedding", "worker", "queue", "summarizer", "manifest")),
+    (re.compile(r"\b(?:retriev(?:e|al)|search|semantic|keyword|vector|citation|citations|evidence)\b", re.IGNORECASE),
+     ("retriev", "retriever", "search", "query", "vector", "embed", "citation", "evidence", "context")),
 )
 NARROW_COMPONENT_PATTERN = re.compile(
     r"\b(?:nav(?:igation)?(?:\s*bar)?|navbar|menu|header|sidebar|side\s*bar|chat|conversation|message)\b",
@@ -177,7 +181,7 @@ def extract_question_path_hints(query: str) -> list[str]:
     for pattern, candidates in QUESTION_PATH_HINTS:
         if pattern.search(query):
             hints.extend(candidates)
-    return list(dict.fromkeys(hints))[:8]
+    return list(dict.fromkeys(hints))[:16]
 
 
 def is_narrow_component_question(query: str) -> bool:
@@ -200,13 +204,22 @@ def is_api_question(query: str) -> bool:
     return bool(API_QUERY_PATTERN.search(query))
 
 
-def is_strict_target_question(query: str, requested_paths: list[str]) -> bool:
+def is_strict_target_question(
+    query: str,
+    requested_paths: list[str],
+    include_overview_files: bool = False,
+) -> bool:
     """Return whether evidence should be limited to explicit/path-targeted files."""
+    # An explicit documentation request is allowed to use README/docs
+    # evidence. A named file still follows the exact-file contract below.
+    if include_overview_files and not requested_paths:
+        return False
     return bool(
         requested_paths
         or is_narrow_component_question(query)
         or is_location_question(query)
         or is_api_question(query)
+        or bool(extract_question_path_hints(query))
     )
 
 
@@ -218,7 +231,11 @@ def path_matches_hints(file_path: str, hints: list[str]) -> bool:
     ``backend/api/routes.py``.
     """
     tokens = [token for token in re.split(r"[^a-z0-9]+", file_path.lower()) if token]
-    return any(hint.lower() in tokens for hint in hints)
+    normalized_tokens = set(tokens)
+    # Treat simple plural filenames (routes.py, apis.ts) as the same path
+    # family as their singular query term without using substring matching.
+    normalized_tokens.update(token[:-1] for token in tokens if token.endswith("s") and len(token) > 3)
+    return any(hint.lower() in normalized_tokens for hint in hints)
 
 
 def is_exploratory_repository_question(query: str, requested_paths: list[str]) -> bool:
@@ -279,7 +296,10 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
     """
     profile = EVIDENCE_WORKFLOWS.get(workflow, EVIDENCE_WORKFLOWS["general"])
     terms = list(dict.fromkeys([*search_terms(query), *profile["terms"]]))[:20]
-    path_hints = list(dict.fromkeys([*profile["path_hints"], *extract_question_path_hints(query)]))[:12]
+    # Query-specific hints take precedence over workflow defaults. This keeps
+    # a security or due-diligence profile from pushing the actual API/component
+    # paths out of the bounded evidence plan.
+    path_hints = list(dict.fromkeys([*extract_question_path_hints(query), *profile["path_hints"]]))[:16]
     requested_files = extract_requested_file_paths(query)
     if requested_files:
         scope = "explicit_file"
@@ -289,6 +309,8 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
         scope = "targeted_api_location" if is_api_question(query) else "targeted_location"
     elif is_exploratory_repository_question(query, requested_files):
         scope = "repository_overview"
+    elif extract_question_path_hints(query):
+        scope = "targeted_topic"
     else:
         scope = "general"
     return {
@@ -549,7 +571,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     # fill the remaining context slots with arbitrary semantic matches. Keep
     # only files whose paths identify the requested area; if no such path is
     # present, returning no evidence is safer than citing unrelated files.
-    if not requested_paths and is_strict_target_question(query, requested_paths):
+    if not requested_paths and is_strict_target_question(query, requested_paths, include_overview_files):
         target_hints = extract_question_path_hints(query)
         targeted_chunks = [
             chunk for chunk in ranked_chunks
