@@ -38,6 +38,78 @@ IMPACT_QUESTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# These files are useful for repository-wide orientation, but they are not
+# implementation evidence for a targeted question. Keep them out of normal
+# sparse/dense retrieval so a question about a component cannot be cited with
+# a generic README simply because it repeats a few of the same words.
+OVERVIEW_FILE_NAMES = {
+    "readme", "readme.md", "readme.rst", "readme.txt",
+    "contributing", "contributing.md", "changelog", "changelog.md",
+    "changes.md", "license", "license.md", "copying",
+}
+
+DOCUMENTATION_REQUEST_PATTERN = re.compile(
+    r"\b(?:readme|documentation|docs?|contributing|changelog|license)\b",
+    re.IGNORECASE,
+)
+
+# Natural-language component names do not always include a literal filename
+# such as ``SiteHeader.jsx``. These hints bridge that gap without treating a
+# whole repository as relevant.
+QUESTION_PATH_HINTS = (
+    (re.compile(r"\b(?:nav(?:igation)?(?:\s*bar)?|navbar|menu|header)\b", re.IGNORECASE),
+     ("nav", "navbar", "navigation", "header", "siteheader")),
+    (re.compile(r"\b(?:sidebar|side\s*bar)\b", re.IGNORECASE), ("sidebar", "side-bar")),
+    (re.compile(r"\b(?:chat|conversation|message)\b", re.IGNORECASE), ("chat", "conversation", "message")),
+    (re.compile(r"\b(?:authentication|authorization|sign[ -]?in|login|oauth)\b", re.IGNORECASE),
+     ("auth", "login", "signin", "oauth", "session")),
+    (re.compile(r"\b(?:api|apis|endpoint|endpoints|route|routes|router|routers|handler|handlers|rest|request|requests)\b", re.IGNORECASE),
+     ("api", "apis", "endpoint", "endpoints", "route", "routes", "router", "routers", "handler", "handlers", "server", "backend", "main", "app")),
+    (re.compile(r"\b(?:database|databases|db|schema|sql|query|queries|migration|migrations)\b", re.IGNORECASE),
+     ("database", "db", "schema", "sql", "migration", "migrations", "model", "models", "repository")),
+)
+NARROW_COMPONENT_PATTERN = re.compile(
+    r"\b(?:nav(?:igation)?(?:\s*bar)?|navbar|menu|header|sidebar|side\s*bar|chat|conversation|message)\b",
+    re.IGNORECASE,
+)
+LOCATION_QUERY_PATTERN = re.compile(
+    r"\b(?:where|which|what)\b.{0,60}\b(?:located|location|defined|implemented|live|lives|entry\s*point|file|path|endpoint|route|api)\b|"
+    r"\b(?:locate|find|show)\b.{0,40}\b(?:api|endpoint|route|router|handler|entry\s*point|file)\b",
+    re.IGNORECASE,
+)
+API_QUERY_PATTERN = re.compile(
+    r"\b(?:api|apis|endpoint|endpoints|route|routes|router|routers|handler|handlers|rest)\b",
+    re.IGNORECASE,
+)
+
+# Ordinary question words create very broad FTS matches (for example, a
+# question containing ``where`` can match dozens of comments and README
+# paragraphs). Remove them before sparse retrieval; technical terms remain.
+QUERY_STOPWORDS = {
+    "about", "after", "again", "also", "and", "are", "does", "doing", "from",
+    "give", "how", "into", "its", "just", "like", "located", "location", "make",
+    "please", "show", "that", "the", "this", "what", "when", "where", "which",
+    "with", "would", "your", "project", "repository", "codebase", "code", "work",
+}
+
+
+def is_overview_file(file_path: str) -> bool:
+    """Return whether a path is orientation/documentation-only evidence."""
+    basename = file_path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return basename in OVERVIEW_FILE_NAMES
+
+
+def overview_file_sql(alias: str = "c") -> str:
+    """Build a static SQL predicate for overview-file exclusion.
+
+    The names are constants, not user input, so this remains parameter-safe
+    while allowing both root and nested README paths.
+    """
+    parts = []
+    for name in sorted(OVERVIEW_FILE_NAMES):
+        parts.extend([f"lower({alias}.file_path) = '{name}'", f"lower({alias}.file_path) LIKE '%/{name}'"])
+    return "(" + " OR ".join(parts) + ")"
+
 # Codebases often name authentication modules `auth`, not `authentication`.
 # These small, domain-specific expansions improve keyword retrieval without
 # treating a broad README as proof for an implementation-level answer.
@@ -99,8 +171,63 @@ def extract_requested_file_paths(query: str) -> list[str]:
     return paths
 
 
+def extract_question_path_hints(query: str) -> list[str]:
+    """Infer a small set of component-name path hints from natural language."""
+    hints: list[str] = []
+    for pattern, candidates in QUESTION_PATH_HINTS:
+        if pattern.search(query):
+            hints.extend(candidates)
+    return list(dict.fromkeys(hints))[:8]
+
+
+def is_narrow_component_question(query: str) -> bool:
+    """Identify UI-component questions where unrelated files are noise."""
+    return bool(NARROW_COMPONENT_PATTERN.search(query))
+
+
+def is_location_question(query: str) -> bool:
+    """Identify requests for the implementation location of a feature.
+
+    Location questions need a small, path-focused evidence set. Returning
+    semantically similar files merely to fill ``top_k`` is especially harmful
+    here because the user is asking *where* the implementation lives.
+    """
+    return bool(LOCATION_QUERY_PATTERN.search(query))
+
+
+def is_api_question(query: str) -> bool:
+    """Identify API/route questions so retrieval can prefer server handlers."""
+    return bool(API_QUERY_PATTERN.search(query))
+
+
+def is_strict_target_question(query: str, requested_paths: list[str]) -> bool:
+    """Return whether evidence should be limited to explicit/path-targeted files."""
+    return bool(
+        requested_paths
+        or is_narrow_component_question(query)
+        or is_location_question(query)
+        or is_api_question(query)
+    )
+
+
+def path_matches_hints(file_path: str, hints: list[str]) -> bool:
+    """Match a path hint on filename/directory boundaries, not arbitrary text.
+
+    Boundary matching prevents a hint such as ``api`` from selecting unrelated
+    names like ``capillary.py`` while still matching ``api_client.py`` and
+    ``backend/api/routes.py``.
+    """
+    tokens = [token for token in re.split(r"[^a-z0-9]+", file_path.lower()) if token]
+    return any(hint.lower() in tokens for hint in hints)
+
+
 def is_exploratory_repository_question(query: str, requested_paths: list[str]) -> bool:
     return not requested_paths and bool(EXPLORATORY_REPOSITORY_PATTERN.search(query))
+
+
+def question_requests_overview_files(query: str, requested_paths: list[str]) -> bool:
+    """Allow orientation files only when the user asks for them explicitly."""
+    return any(is_overview_file(path) for path in requested_paths) or bool(DOCUMENTATION_REQUEST_PATTERN.search(query))
 
 
 def is_impact_question(query: str) -> bool:
@@ -133,7 +260,11 @@ def select_diverse_chunks(candidates: list[Dict], limit: int, excluded_ids: set[
 
 def search_terms(query: str) -> list[str]:
     """Keep sparse matching resilient to punctuation and provider-unavailable embeddings."""
-    terms = [word.lower() for word in WORD_PATTERN.findall(query) if len(word) >= 3]
+    terms = [
+        word.lower()
+        for word in WORD_PATTERN.findall(query)
+        if len(word) >= 3 and word.lower() not in QUERY_STOPWORDS
+    ]
     for term in list(terms):
         terms.extend(RETRIEVAL_TERM_ALIASES.get(term, ()))
     return list(dict.fromkeys(terms))[:10]
@@ -148,17 +279,37 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
     """
     profile = EVIDENCE_WORKFLOWS.get(workflow, EVIDENCE_WORKFLOWS["general"])
     terms = list(dict.fromkeys([*search_terms(query), *profile["terms"]]))[:20]
+    path_hints = list(dict.fromkeys([*profile["path_hints"], *extract_question_path_hints(query)]))[:12]
+    requested_files = extract_requested_file_paths(query)
+    if requested_files:
+        scope = "explicit_file"
+    elif is_narrow_component_question(query):
+        scope = "targeted_component"
+    elif is_location_question(query):
+        scope = "targeted_api_location" if is_api_question(query) else "targeted_location"
+    elif is_exploratory_repository_question(query, requested_files):
+        scope = "repository_overview"
+    else:
+        scope = "general"
     return {
         "workflow": workflow if workflow in EVIDENCE_WORKFLOWS else "general",
         "label": profile["label"],
         "focus": profile["focus"],
         "search_terms": terms,
-        "path_hints": list(profile["path_hints"]),
-        "requested_files": extract_requested_file_paths(query),
+        "path_hints": path_hints,
+        "requested_files": requested_files,
+        "query_scope": scope,
     }
 
 
-async def sparse_search(store, repo_id: str, query: str, limit: int = 20, plan: dict | None = None) -> list[Dict]:
+async def sparse_search(
+    store,
+    repo_id: str,
+    query: str,
+    limit: int = 20,
+    plan: dict | None = None,
+    include_overview_files: bool = False,
+) -> list[Dict]:
     terms = list(dict.fromkeys([*search_terms(query), *(plan or {}).get("search_terms", [])]))[:20]
     if not terms:
         return []
@@ -167,12 +318,13 @@ async def sparse_search(store, repo_id: str, query: str, limit: int = 20, plan: 
     # the LIKE implementation as a compatibility fallback for databases that
     # were created before this migration.
     fts_expression = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
+    overview_filter = "" if include_overview_files else f" AND NOT {overview_file_sql('c')}"
     try:
         return await store.fetch_all(
             "SELECT c.id, c.file_path, c.start_line, c.end_line, c.language, c.symbols, c.content, "
             "bm25(chunks_fts) AS score FROM chunks_fts "
             "JOIN chunks c ON c.rowid = chunks_fts.rowid "
-            "WHERE chunks_fts MATCH ? AND c.repo_id = ? "
+            f"WHERE chunks_fts MATCH ? AND c.repo_id = ?{overview_filter} "
             "ORDER BY score ASC, c.file_path ASC, c.start_line ASC LIMIT ?",
             [fts_expression, repo_id, limit],
         )
@@ -183,37 +335,52 @@ async def sparse_search(store, repo_id: str, query: str, limit: int = 20, plan: 
     score_args = [value for term in terms for value in (f"%{term}%", f"%{term}%")]
     sql = (
         "SELECT id, file_path, start_line, end_line, language, symbols, content, "
-        f"({' + '.join(score_parts)}) AS score FROM chunks WHERE repo_id = ? AND ({' OR '.join(matching_parts)}) "
+        f"({' + '.join(score_parts)}) AS score FROM chunks c WHERE c.repo_id = ? "
+        f"AND ({' OR '.join(matching_parts)}){overview_filter} "
         "ORDER BY score DESC, file_path ASC, start_line ASC LIMIT ?"
     )
     return await store.fetch_all(sql, [*score_args, repo_id, *score_args, limit])
 
 
-async def dense_search(store, repo_id: str, query_embedding: list[float], limit: int = 20) -> list[Dict]:
+async def dense_search(
+    store,
+    repo_id: str,
+    query_embedding: list[float],
+    limit: int = 20,
+    include_overview_files: bool = False,
+) -> list[Dict]:
     """Use Turso's native cosine-distance function; query filtering preserves tenant isolation."""
     import json
+    overview_filter = "" if include_overview_files else f" AND NOT {overview_file_sql('chunks')}"
     return await store.fetch_all(
         "SELECT id, file_path, start_line, end_line, language, symbols, content, "
         "vector_distance_cos(embedding, vector32(?)) AS distance "
-        "FROM chunks WHERE repo_id = ? AND embedding IS NOT NULL ORDER BY distance ASC LIMIT ?",
+        f"FROM chunks WHERE repo_id = ? AND embedding IS NOT NULL{overview_filter} ORDER BY distance ASC LIMIT ?",
         [json.dumps(query_embedding), repo_id, limit],
     )
 
 
 async def requested_file_chunks(store, repo_id: str, file_path: str, limit: int) -> list[Dict]:
-    exact_or_suffix = file_path if "/" in file_path else f"%/{file_path}"
+    exact_or_suffix = file_path.lower() if "/" in file_path else f"%/{file_path.lower()}"
     return await store.fetch_all(
         "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
-        "WHERE repo_id = ? AND (file_path = ? OR file_path LIKE ?) ORDER BY file_path, start_line LIMIT ?",
-        [repo_id, file_path, exact_or_suffix, limit],
+        "WHERE repo_id = ? AND (lower(file_path) = ? OR lower(file_path) LIKE ?) ORDER BY file_path, start_line LIMIT ?",
+        [repo_id, file_path.lower(), exact_or_suffix, limit],
     )
 
 
-async def path_hint_chunks(store, repo_id: str, hint: str, limit: int = 2) -> list[Dict]:
+async def path_hint_chunks(
+    store,
+    repo_id: str,
+    hint: str,
+    limit: int = 2,
+    include_overview_files: bool = False,
+) -> list[Dict]:
     """Fetch a small representative sample for an evidence-plan path hint."""
+    overview_filter = "" if include_overview_files else f" AND NOT {overview_file_sql('chunks')}"
     return await store.fetch_all(
         "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
-        "WHERE repo_id = ? AND lower(file_path) LIKE ? ORDER BY file_path, start_line LIMIT ?",
+        f"WHERE repo_id = ? AND lower(file_path) LIKE ?{overview_filter} ORDER BY file_path, start_line LIMIT ?",
         [repo_id, f"%{hint.lower()}%", limit],
     )
 
@@ -240,11 +407,15 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     requested_paths = extract_requested_file_paths(query)
     include_overview = is_exploratory_repository_question(query, requested_paths)
     evidence_plan = build_evidence_plan(query, workflow)
+    include_overview_files = include_overview or question_requests_overview_files(query, requested_paths)
+    evidence_plan["overview_files_allowed"] = include_overview_files
 
-    sparse_task = asyncio.create_task(sparse_search(store, repo_id, query, plan=evidence_plan))
+    sparse_task = asyncio.create_task(
+        sparse_search(store, repo_id, query, plan=evidence_plan, include_overview_files=include_overview_files)
+    )
     file_tasks = [asyncio.create_task(requested_file_chunks(store, repo_id, path, top_k)) for path in requested_paths]
     plan_tasks = [
-        asyncio.create_task(path_hint_chunks(store, repo_id, hint))
+        asyncio.create_task(path_hint_chunks(store, repo_id, hint, include_overview_files=include_overview_files))
         for hint in evidence_plan.get("path_hints", [])[:8]
     ]
     readme_task = (
@@ -262,7 +433,9 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
 
     try:
         query_embedding = await asyncio.to_thread(embed_query, query)
-        dense_task = asyncio.create_task(dense_search(store, repo_id, query_embedding))
+        dense_task = asyncio.create_task(
+            dense_search(store, repo_id, query_embedding, include_overview_files=include_overview_files)
+        )
     except (EmbeddingUnavailableError, ModelConfigurationError):
         logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
         dense_task = None
@@ -296,6 +469,17 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     cursor += 1 if readme_task else 0
     overview_chunks = successful[cursor] if overview_task else []
 
+    # Keep this guard in addition to the SQL predicates. It protects callers
+    # that provide a compatibility/mock store and makes the citation contract
+    # explicit at the final evidence boundary.
+    if not include_overview_files:
+        dense_chunks = [chunk for chunk in dense_chunks if not is_overview_file(str(chunk.get("file_path", "")))]
+        sparse_chunks = [chunk for chunk in sparse_chunks if not is_overview_file(str(chunk.get("file_path", "")))]
+        plan_results = [
+            [chunk for chunk in rows if not is_overview_file(str(chunk.get("file_path", "")))]
+            for rows in plan_results
+        ]
+
     def annotate(chunk: Dict, method: str, reason: str) -> Dict:
         enriched = dict(chunk)
         enriched["_retrieval_methods"] = list(dict.fromkeys([*(enriched.get("_retrieval_methods") or []), method]))
@@ -323,7 +507,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         scores[chunk["id"]] = 2.0
     for chunk in planned_map.values():
         chunk_map[chunk["id"]] = chunk
-        scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.015
+        scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.5
     for source, method, reason in (
         (dense_chunks, "semantic", "Semantic similarity to the question"),
         (sparse_chunks, "keyword", "Keyword match in file path or source content"),
@@ -332,8 +516,11 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             annotated = annotate(chunk_map.get(chunk["id"], chunk), method, reason)
             chunk_map[chunk["id"]] = annotated
             scores[chunk["id"]] = scores.get(chunk["id"], 0) + 1.0 / (60 + rank + 1)
-            if any(hint in str(chunk.get("file_path", "")).lower() for hint in evidence_plan["path_hints"]):
-                scores[chunk["id"]] += 0.01
+            if path_matches_hints(str(chunk.get("file_path", "")), evidence_plan["path_hints"]):
+                # A path match is stronger evidence than a generic semantic
+                # match, particularly for ``where is the API defined?``
+                # questions. Keep this boost deterministic and bounded.
+                scores[chunk["id"]] += 0.75
     ranked_chunks = [chunk_map[chunk_id] for chunk_id in sorted(scores, key=scores.get, reverse=True)]
 
     # Impact questions get one extra, explicitly labelled pass over the
@@ -357,6 +544,18 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             chunk_map[chunk["id"]] = annotated
             scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.02
         ranked_chunks = [chunk_map[chunk_id] for chunk_id in sorted(scores, key=scores.get, reverse=True)]
+
+    # For a targeted component or implementation-location question, do not
+    # fill the remaining context slots with arbitrary semantic matches. Keep
+    # only files whose paths identify the requested area; if no such path is
+    # present, returning no evidence is safer than citing unrelated files.
+    if not requested_paths and is_strict_target_question(query, requested_paths):
+        target_hints = extract_question_path_hints(query)
+        targeted_chunks = [
+            chunk for chunk in ranked_chunks
+            if path_matches_hints(str(chunk.get("file_path", "")), target_hints)
+        ]
+        ranked_chunks = targeted_chunks
     # Broad overview evidence is a fallback, never an automatic citation. If
     # dense or sparse retrieval has direct evidence, that evidence remains the
     # entire source set. This prevents README.md from appearing beside an
@@ -368,9 +567,12 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         ranked_chunks = list(fallback_by_id.values())
 
     requested_ids = {chunk["id"] for chunk in requested_chunks}
-    final_chunks = requested_chunks[:top_k]
-    if len(final_chunks) < top_k:
-        final_chunks.extend(select_diverse_chunks(ranked_chunks, top_k - len(final_chunks), requested_ids))
+    if requested_chunks:
+        # An explicit path request is an exact citation contract. Do not add
+        # unrelated semantic matches merely to fill ``top_k``.
+        final_chunks = requested_chunks[:top_k]
+    else:
+        final_chunks = select_diverse_chunks(ranked_chunks, top_k, requested_ids)
     for chunk in final_chunks:
         chunk["_relevance_score"] = round(scores.get(chunk["id"], 0.0), 6)
     return final_chunks

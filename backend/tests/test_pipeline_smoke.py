@@ -176,6 +176,88 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("middleware", plan["path_hints"])
         self.assertIn("auth", plan["search_terms"])
 
+    def test_navigation_question_excludes_readme_and_targets_header_files(self):
+        from retrieval.retriever import build_evidence_plan, is_overview_file, retrieve_context
+
+        plan = build_evidence_plan("How do I change the NAV bar design?", "general")
+        self.assertIn("header", plan["path_hints"])
+        readme = {
+            "id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 8,
+            "language": "md", "symbols": [], "content": "The navigation is described here.",
+        }
+        header = {
+            "id": "header-1", "file_path": "frontend/src/components/SiteHeader.jsx", "start_line": 1,
+            "end_line": 24, "language": "jsx", "symbols": ["SiteHeader"],
+            "content": "export function SiteHeader() { return <nav />; }",
+        }
+        footer = {
+            "id": "footer-1", "file_path": "frontend/src/components/Footer.jsx", "start_line": 1,
+            "end_line": 12, "language": "jsx", "symbols": ["Footer"],
+            "content": "export function Footer() { return <footer />; }",
+        }
+
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            # Simulate a broad keyword match plus targeted path-hint matches.
+            return [header] if "LIKE ?" in sql else [readme, header, footer]
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", "How do I change the NAV bar design?", top_k=4))
+
+        self.assertTrue(result)
+        self.assertTrue(any(chunk["file_path"].endswith("SiteHeader.jsx") for chunk in result))
+        self.assertFalse(any(is_overview_file(chunk["file_path"]) for chunk in result))
+        self.assertFalse(any(chunk["file_path"].endswith("Footer.jsx") for chunk in result))
+
+    def test_api_location_question_returns_only_api_path_evidence(self):
+        from retrieval.retriever import build_evidence_plan, retrieve_context
+
+        question = "Where is the API defined in this project?"
+        plan = build_evidence_plan(question)
+        self.assertEqual(plan["query_scope"], "targeted_api_location")
+        self.assertIn("api", plan["path_hints"])
+
+        readme = {
+            "id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 12,
+            "language": "md", "symbols": [], "content": "The API is described here.",
+        }
+        route = {
+            "id": "route-1", "file_path": "backend/api/routes.py", "start_line": 1, "end_line": 28,
+            "language": "py", "symbols": ["router"], "content": "router = APIRouter()",
+        }
+        unrelated = {
+            "id": "service-1", "file_path": "backend/services/users.py", "start_line": 1, "end_line": 18,
+            "language": "py", "symbols": ["UserService"], "content": "class UserService: pass",
+        }
+
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            # Path-hint queries should return only their matching path; broad
+            # retrieval simulates the noisy candidates seen in production.
+            if "lower(file_path) LIKE ?" in sql:
+                return [route]
+            return [readme, route, unrelated]
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", question, top_k=4))
+
+        self.assertEqual([chunk["file_path"] for chunk in result], ["backend/api/routes.py"])
+
+    def test_sparse_terms_ignore_question_stopwords(self):
+        from retrieval.retriever import search_terms
+
+        terms = search_terms("Where does the API live in this project?")
+        self.assertIn("api", terms)
+        self.assertNotIn("where", terms)
+        self.assertNotIn("does", terms)
+        self.assertNotIn("the", terms)
+
     def test_dependency_manifest_resolves_only_local_imports(self):
         from ingest.dependencies import build_dependency_manifest
         with tempfile.TemporaryDirectory() as tmp:
