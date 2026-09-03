@@ -52,6 +52,8 @@ The workspace can support a bounded architecture review, security review, onboar
 
 ## How the system works
 
+<img width="677" height="572" alt="image" src="https://github.com/user-attachments/assets/a0b9569d-9e63-4db1-b2d6-f8a4b4dcb59c" />
+
 ### Authentication
 
 The user signs in with Google through Supabase Auth. The browser receives a Supabase session token. The FastAPI server validates that token and uses the authenticated user identifier for every repository, conversation, job, usage, and billing query.
@@ -61,6 +63,8 @@ Supabase is used as the identity provider. Repository content, vectors, metadata
 ### Repository submission
 
 The user submits a public HTTPS GitHub repository URL. The server normalizes the URL, validates its shape, checks the account limits, and creates or reuses an owned repository row. A durable ingestion job is written before the request returns to the browser.
+
+<img width="343" height="514" alt="image" src="https://github.com/user-attachments/assets/38c41665-47a7-46f3-b632-95aada7ee184" />
 
 ### Cloning
 
