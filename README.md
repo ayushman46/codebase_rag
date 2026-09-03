@@ -8,7 +8,7 @@ Modern repositories are difficult to learn because useful context is spread acro
 
 Codebase Intelligence addresses that gap by building a searchable source workspace before answering questions. It combines exact file lookup, keyword search, semantic search, dependency evidence, file metadata, and a question specific evidence plan.
 
-## Who benefits from it
+## Who benefits from it -
 
 ### A new intern joining a company
 
