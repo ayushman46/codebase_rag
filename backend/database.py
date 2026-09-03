@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Iterable
@@ -141,7 +142,15 @@ class TursoStore:
 
     @staticmethod
     def _is_read_statement(sql: str) -> bool:
-        return sql.lstrip().upper().startswith(("SELECT", "EXPLAIN", "PRAGMA"))
+        normalized = sql.lstrip().upper()
+        if normalized.startswith(("SELECT", "EXPLAIN", "PRAGMA")):
+            return True
+        # The retrieval planner uses a read-only window-function CTE. Treat
+        # WITH statements as reads unless they contain a mutating verb, so the
+        # optimization above also applies to that single batched lookup.
+        return normalized.startswith("WITH") and not re.search(
+            r"\b(?:INSERT|UPDATE|DELETE|REPLACE)\b", normalized
+        )
 
     @staticmethod
     def _is_transient_error(error: Exception) -> bool:
@@ -161,7 +170,11 @@ class TursoStore:
         columns = [item[0] for item in cursor.description] if cursor.description else []
         rows = [self._row_to_dict(columns, row) for row in cursor.fetchall()] if columns else []
         affected = cursor.rowcount if cursor.rowcount >= 0 else len(rows)
-        self._client.commit()
+        # Read statements do not open a write transaction. Avoiding an
+        # unnecessary remote COMMIT removes one round trip from every SELECT
+        # while leaving DDL and mutations fully durable.
+        if not self._is_read_statement(sql):
+            self._client.commit()
         return QueryResult(rows=rows, rows_affected=affected)
 
     async def _refresh_connection(self) -> None:
@@ -239,7 +252,10 @@ class TursoStore:
             if chunk.get("embedding") is None:
                 without_embeddings.append(Statement(plain_sql, values))
             else:
-                with_embeddings.append(Statement(vector_sql, values + [json.dumps(chunk["embedding"])]))
+                with_embeddings.append(Statement(
+                    vector_sql,
+                    values + [json.dumps(chunk["embedding"], separators=(",", ":"))],
+                ))
         await self.batch(with_embeddings + without_embeddings)
 
     async def close(self) -> None:
@@ -275,11 +291,21 @@ async def assert_turso_schema() -> None:
             return
         try:
             store = get_turso_store()
-            for table in (
+            required_tables = (
                 "repos", "chunks", "repo_files", "repo_dependencies", "repo_coverage",
                 "ingestion_jobs", "chat_messages", "kt_cache", "account_entitlements", "billing_orders",
-            ):
-                await store.execute(f"SELECT 1 FROM {table} LIMIT 1")
+            )
+            placeholders = ", ".join("?" for _ in required_tables)
+            rows = await store.fetch_all(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + placeholders + ")",
+                list(required_tables),
+            )
+            present = {str(row.get("name")) for row in rows}
+            missing = [table for table in required_tables if table not in present]
+            if missing:
+                raise DatabaseConfigurationError(
+                    "Turso schema is missing required tables: " + ", ".join(missing)
+                )
         except DatabaseConfigurationError:
             raise
         except Exception as error:

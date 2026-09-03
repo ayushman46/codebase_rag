@@ -3,6 +3,17 @@ import ReactMarkdown from 'react-markdown';
 import CodeBlock from './CodeBlock';
 import ToolCallTrace from './ToolCallTrace';
 
+const markdownComponents = {
+  h2: ({ children }) => <h2 className="mt-7 text-lg font-semibold tracking-tight first:mt-0">{children}</h2>,
+  h3: ({ children }) => <h3 className="mt-6 text-base font-semibold first:mt-0">{children}</h3>,
+  p: ({ children }) => <p className="mt-3 leading-relaxed first:mt-0">{children}</p>,
+  ul: ({ children }) => <ul className="mt-3 list-disc space-y-2 pl-5 marker:text-ember-orange">{children}</ul>,
+  ol: ({ children }) => <ol className="mt-3 list-decimal space-y-2 pl-5 marker:font-semibold marker:text-ember-orange">{children}</ol>,
+  li: ({ children }) => <li className="pl-1 leading-relaxed">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-ink-black">{children}</strong>,
+  code: ({ children }) => <code className="rounded bg-pure-white px-1.5 py-0.5 font-mono text-[0.9em] text-charcoal">{children}</code>,
+};
+
 const MessageBubble = ({ message }) => {
   const [showCitations, setShowCitations] = useState(false);
   const isUser = message.role === 'user';
@@ -20,16 +31,7 @@ const MessageBubble = ({ message }) => {
           ) : (
             <ReactMarkdown
               skipHtml
-              components={{
-                h2: ({ children }) => <h2 className="mt-7 text-lg font-semibold tracking-tight first:mt-0">{children}</h2>,
-                h3: ({ children }) => <h3 className="mt-6 text-base font-semibold first:mt-0">{children}</h3>,
-                p: ({ children }) => <p className="mt-3 leading-relaxed first:mt-0">{children}</p>,
-                ul: ({ children }) => <ul className="mt-3 list-disc space-y-2 pl-5 marker:text-ember-orange">{children}</ul>,
-                ol: ({ children }) => <ol className="mt-3 list-decimal space-y-2 pl-5 marker:font-semibold marker:text-ember-orange">{children}</ol>,
-                li: ({ children }) => <li className="pl-1 leading-relaxed">{children}</li>,
-                strong: ({ children }) => <strong className="font-semibold text-ink-black">{children}</strong>,
-                code: ({ children }) => <code className="rounded bg-pure-white px-1.5 py-0.5 font-mono text-[0.9em] text-charcoal">{children}</code>,
-              }}
+              components={markdownComponents}
             >
               {message.content}
             </ReactMarkdown>
@@ -68,4 +70,4 @@ const MessageBubble = ({ message }) => {
   );
 };
 
-export default MessageBubble;
+export default React.memo(MessageBubble);

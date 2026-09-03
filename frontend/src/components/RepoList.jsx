@@ -18,6 +18,7 @@ const RepoList = () => {
   const dialogRef = useRef(null);
   const dialogInvokerRef = useRef(null);
   const isSavingRef = useRef(false);
+  const actionGuardRef = useRef(new Set());
 
   useEffect(() => {
     isSavingRef.current = isSaving;
@@ -63,6 +64,8 @@ const RepoList = () => {
   };
 
   const handleReindex = async (repo) => {
+    if (actionGuardRef.current.has(`reindex:${repo.id}`)) return;
+    actionGuardRef.current.add(`reindex:${repo.id}`);
     setRetryingRepoId(repo.id);
     setRepositoryActionError(null);
     try {
@@ -74,10 +77,13 @@ const RepoList = () => {
       });
     } finally {
       setRetryingRepoId(null);
+      actionGuardRef.current.delete(`reindex:${repo.id}`);
     }
   };
 
   const handleStop = async (repo) => {
+    if (actionGuardRef.current.has(`stop:${repo.id}`)) return;
+    actionGuardRef.current.add(`stop:${repo.id}`);
     setStoppingRepoId(repo.id);
     setRepositoryActionError(null);
     try {
@@ -89,6 +95,7 @@ const RepoList = () => {
       });
     } finally {
       setStoppingRepoId(null);
+      actionGuardRef.current.delete(`stop:${repo.id}`);
     }
   };
 

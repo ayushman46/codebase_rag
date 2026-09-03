@@ -168,6 +168,9 @@ async def embed_repository_chunks(store, repo_id: str, chunks: list[dict], job_i
     """Embed in cancellable batches and publish meaningful UI progress."""
     embedded_chunks: list[dict] = []
     batch_size = max(1, settings.embedding_batch_size)
+    minimum_batch_size = min(batch_size, max(1, settings.embedding_min_batch_size))
+    progress_interval = max(1, settings.embedding_progress_interval_batches)
+    heartbeat_interval = max(1, settings.embedding_heartbeat_interval_batches)
     total_chunks = len(chunks)
 
     async def report_progress(completed: int):
@@ -179,14 +182,36 @@ async def embed_repository_chunks(store, repo_id: str, chunks: list[dict], job_i
                 "Large repositories can take a few minutes while embeddings are created."
             ),
         )
-        await heartbeat_job(store, job_id, claim_token)
 
     await report_progress(0)
-    for offset in range(0, len(chunks), batch_size):
+    offset = 0
+    batch_number = 0
+    while offset < len(chunks):
+        batch_number += 1
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
-        batch = chunks[offset:offset + batch_size]
-        embedded_chunks.extend(await run_blocking(embed_chunks, batch))
-        await report_progress(len(embedded_chunks))
+        current_size = min(batch_size, len(chunks) - offset)
+        batch = chunks[offset:offset + current_size]
+        observed_batch_size = [current_size]
+        embedded_chunks.extend(await run_blocking(
+            embed_chunks,
+            batch,
+            initial_batch_size=current_size,
+            on_batch_size_change=lambda value: observed_batch_size.__setitem__(0, value),
+        ))
+        completed = len(embedded_chunks)
+        # Persist a provider payload reduction for the remainder of this
+        # repository. A payload-limited endpoint should not reject the first
+        # batch of every subsequent request.
+        batch_size = max(minimum_batch_size, min(current_size, observed_batch_size[0]))
+        offset += current_size
+        # Progress is useful to the UI but does not need one remote write per
+        # provider request. Cancellation remains checked for every batch.
+        if batch_number % progress_interval == 0 or completed == total_chunks:
+            await report_progress(completed)
+        if job_id and claim_token and (
+            batch_number % heartbeat_interval == 0 or completed == total_chunks
+        ):
+            await heartbeat_job(store, job_id, claim_token)
     return embedded_chunks
 
 
@@ -452,10 +477,17 @@ async def run_ingestion_for_repo(
             replacing_repo_id=repo_id,
         )
 
-        manifest = await run_blocking(build_file_manifest, files, repo_path)
-        dependencies = await run_blocking(build_dependency_manifest, files, repo_path)
-        previous_rows = await store.fetch_all(
+        # These are independent reads of the immutable shallow clone. Run the
+        # CPU/file work together and overlap it with the metadata lookup so a
+        # large repository does not pay three full serial passes before
+        # chunking starts.
+        manifest_task = run_blocking(build_file_manifest, files, repo_path)
+        dependency_task = run_blocking(build_dependency_manifest, files, repo_path)
+        previous_rows_task = store.fetch_all(
             "SELECT file_path, content_hash FROM repo_files WHERE repo_id = ?", [repo_id]
+        )
+        manifest, dependencies, previous_rows = await asyncio.gather(
+            manifest_task, dependency_task, previous_rows_task,
         )
         previous_manifest = {row["file_path"]: row["content_hash"] for row in previous_rows}
         changed_paths = {
@@ -541,8 +573,11 @@ async def run_ingestion_for_repo(
         await build_kt_cache(store, repo_id, indexed_chunks)
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         if job_id and claim_token:
-            if semantic_index_warning:
-                await update_repo(store, repo_id, error_message=semantic_index_warning)
+            # Progress is temporarily stored in the existing message column
+            # for clients that already poll it. Clear the completed-progress
+            # text before the worker publishes ``ready`` so it is never shown
+            # as a stale error after a successful index.
+            await update_repo(store, repo_id, error_message=semantic_index_warning)
             return True
         await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message=semantic_index_warning)
         return True

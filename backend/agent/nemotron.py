@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import threading
 from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
@@ -22,6 +23,37 @@ _INTERNAL_PLANNING_PREFIX = re.compile(
     r"i (?:should|need to|will)|we (?:should|need to|will)|no need to)\b",
     re.IGNORECASE,
 )
+
+_async_client: AsyncOpenAI | None = None
+_async_client_loop: asyncio.AbstractEventLoop | None = None
+_async_client_lock = threading.Lock()
+
+
+def get_async_client() -> AsyncOpenAI:
+    """Reuse one HTTP client per event loop so keep-alive connections survive requests."""
+    global _async_client, _async_client_loop
+    loop = asyncio.get_running_loop()
+    with _async_client_lock:
+        if _async_client is None or _async_client_loop is not loop:
+            _async_client = AsyncOpenAI(
+                base_url=settings.nvidia_base_url,
+                api_key=require_nvidia_api_key(),
+                timeout=settings.nvidia_timeout_seconds,
+                max_retries=0,
+            )
+            _async_client_loop = loop
+        return _async_client
+
+
+async def close_async_client() -> None:
+    """Close the process-scoped provider client during application shutdown."""
+    global _async_client, _async_client_loop
+    with _async_client_lock:
+        client = _async_client
+        _async_client = None
+        _async_client_loop = None
+    if client is not None:
+        await client.close()
 
 
 def user_facing_content(content: str) -> str:
@@ -66,12 +98,11 @@ async def complete(
 ) -> str:
     """Return final answer content while intentionally discarding private reasoning."""
     api_key = require_nvidia_api_key()
-    client = AsyncOpenAI(
-        base_url=settings.nvidia_base_url,
-        api_key=api_key,
-        timeout=settings.nvidia_timeout_seconds,
-        max_retries=0,
-    )
+    # Validate configuration before entering the retry loop, then reuse the
+    # process-scoped client to avoid a DNS/TLS connection setup on every query.
+    if not api_key:
+        raise ModelConfigurationError("NVIDIA is not configured.")
+    client = get_async_client()
     last_error: Exception | None = None
     try:
         for attempt in range(max(1, settings.embedding_retry_attempts)):
@@ -119,5 +150,3 @@ async def complete(
         raise
     except Exception as error:
         raise LLMProviderError("NVIDIA returned an invalid response.") from error
-    finally:
-        await client.close()

@@ -1,6 +1,12 @@
 import { create } from 'zustand';
-import { cancelIndexing, deleteRepository, getConversation, getRepos, getStatus, queryRepo, reindexRepository, renameRepository } from '../api/client';
+import { cancelIndexing, deleteRepository, getConversation, getRepos, getStatus, getStatuses, queryRepo, reindexRepository, renameRepository } from '../api/client';
 import { isSupabaseConfigured, supabase } from '../api/supabase';
+import { isIngestionActive } from '../components/IngestionProgress';
+
+let conversationRequestController = null;
+let queryRequestController = null;
+let statusPollInFlight = false;
+const statusMutationRevisions = new Map();
 
 const useStore = create((set, get) => ({
   repos: [],
@@ -47,6 +53,10 @@ const useStore = create((set, get) => ({
   },
 
   signOut: async () => {
+    conversationRequestController?.abort();
+    queryRequestController?.abort();
+    conversationRequestController = null;
+    queryRequestController = null;
     try {
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
@@ -57,19 +67,29 @@ const useStore = create((set, get) => ({
   },
 
   setSelectedRepo: async (repoName) => {
+    conversationRequestController?.abort();
+    queryRequestController?.abort();
+    conversationRequestController = null;
+    queryRequestController = null;
     if (!repoName) {
       set((state) => ({ selectedRepo: null, messages: [], isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
       return;
     }
     set((state) => ({ selectedRepo: repoName, messages: [], isHistoryLoading: true, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
+    const controller = new AbortController();
+    conversationRequestController = controller;
     try {
-      const res = await getConversation(repoName);
+      const res = await getConversation(repoName, { signal: controller.signal });
       if (get().selectedRepo === repoName) {
         set({ messages: res.data.messages || [], isHistoryLoading: false });
       }
     } catch (e) {
-      console.error(e);
-      if (get().selectedRepo === repoName) set({ messages: [], isHistoryLoading: false });
+      if (e.code !== 'ERR_CANCELED' && e.name !== 'CanceledError') console.error(e);
+      if (conversationRequestController === controller && get().selectedRepo === repoName) {
+        set({ messages: [], isHistoryLoading: false });
+      }
+    } finally {
+      if (conversationRequestController === controller) conversationRequestController = null;
     }
   },
 
@@ -94,9 +114,38 @@ const useStore = create((set, get) => ({
     }
   },
 
+  pollStatuses: async () => {
+    if (statusPollInFlight) return;
+    const userId = get().user?.id;
+    const activeRepos = get().repos.filter((repo) => isIngestionActive(repo.status));
+    if (!userId || activeRepos.length === 0) return;
+    const revisions = new Map(activeRepos.map((repo) => [repo.id, statusMutationRevisions.get(repo.id) || 0]));
+    statusPollInFlight = true;
+    try {
+      const res = await getStatuses();
+      const updates = (res.data || []).map((data) => ({ repoName: data.repo_name, data }));
+      if (get().user?.id !== userId || updates.length === 0) return;
+      const byName = new Map(updates.map(({ repoName, data }) => [repoName, data]));
+      set((state) => ({
+        repos: state.repos.map((repo) => {
+          // A re-index/stop mutation may have completed after this poll
+          // started. Never let that older response overwrite the user's
+          // locally published state.
+          if (revisions.get(repo.id) !== (statusMutationRevisions.get(repo.id) || 0)) return repo;
+          return byName.has(repo.repo_name) ? { ...repo, ...byName.get(repo.repo_name) } : repo;
+        }),
+      }));
+    } catch (error) {
+      if (error.code !== 'ERR_CANCELED') console.error(error);
+    } finally {
+      statusPollInFlight = false;
+    }
+  },
+
   setIngesting: (val) => set({ isIngesting: val }),
 
   reindexRepo: async (repo) => {
+    statusMutationRevisions.set(repo.id, (statusMutationRevisions.get(repo.id) || 0) + 1);
     await reindexRepository(repo.repo_name);
     set((state) => ({
       repos: state.repos.map((item) => item.id === repo.id
@@ -106,6 +155,7 @@ const useStore = create((set, get) => ({
   },
 
   cancelRepoIndexing: async (repo) => {
+    statusMutationRevisions.set(repo.id, (statusMutationRevisions.get(repo.id) || 0) + 1);
     await cancelIndexing(repo.repo_name);
     set((state) => ({
       repos: state.repos.map((item) => item.id === repo.id
@@ -138,6 +188,9 @@ const useStore = create((set, get) => ({
     const repo = get().selectedRepo;
     if (!repo) return;
     const queryEpoch = get().queryEpoch;
+    queryRequestController?.abort();
+    const controller = new AbortController();
+    queryRequestController = controller;
 
     const userMsg = { id: crypto.randomUUID(), role: 'user', content: question };
     set((state) => ({ 
@@ -146,7 +199,7 @@ const useStore = create((set, get) => ({
     }));
 
     try {
-      const res = await queryRepo(repo, question, modelProfile, workflow);
+      const res = await queryRepo(repo, question, modelProfile, workflow, { signal: controller.signal });
       const data = res.data;
       
       const assistantMsg = {
@@ -168,6 +221,7 @@ const useStore = create((set, get) => ({
           : {}
       ));
     } catch (e) {
+      if (e.code === 'ERR_CANCELED' || e.name === 'CanceledError') return;
       const detail = e.response?.data?.detail;
       const message = typeof detail === 'string' && detail.trim()
         ? detail
@@ -177,6 +231,8 @@ const useStore = create((set, get) => ({
           ? { messages: [...state.messages, { id: crypto.randomUUID(), role: 'assistant', content: message, mode: 'error' }], isQuerying: false }
           : {}
       ));
+    } finally {
+      if (queryRequestController === controller) queryRequestController = null;
     }
   }
 }));

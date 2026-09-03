@@ -3,7 +3,6 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import RequireAuth from './components/RequireAuth';
 import SiteHeader from './components/SiteHeader';
 import { supabase } from './api/supabase';
-import { isIngestionActive } from './components/IngestionProgress';
 import useStore from './store/useStore';
 
 const AccountPage = lazy(() => import('./pages/AccountPage'));
@@ -22,7 +21,7 @@ const PageLoader = () => <div className="flex min-h-[calc(100vh-5rem)] items-cen
 const marketingPage = (page) => <Suspense fallback={<PageLoader />}><MarketingLayout>{page}</MarketingLayout></Suspense>;
 
 function App() {
-  const { fetchRepos, pollStatus, repos, setUser, user } = useStore();
+  const { fetchRepos, pollStatuses, setUser, user } = useStore();
   const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
@@ -51,13 +50,16 @@ function App() {
 
   useEffect(() => {
     if (!user) return undefined;
-    const interval = setInterval(() => {
-      repos.forEach((repo) => {
-        if (isIngestionActive(repo.status)) pollStatus(repo.repo_name);
-      });
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [repos, pollStatus, user]);
+    const tick = () => {
+      if (document.visibilityState !== 'hidden') pollStatuses();
+    };
+    const interval = setInterval(tick, 5000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, [pollStatuses, user]);
 
   if (authLoading) {
     return <div className="flex h-screen w-full items-center justify-center bg-warm-canvas text-ink-black"><span className="text-center text-sm font-medium uppercase tracking-widest text-pewter animate-pulse">Initializing secure workspace</span></div>;

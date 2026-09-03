@@ -30,11 +30,19 @@ class Settings(BaseSettings):
     # Keep hosted embedding requests deliberately small. Code chunks can be
     # substantially larger than ordinary chat inputs, and large batches are
     # more likely to be rejected by a shared hosted endpoint.
-    embedding_batch_size: int = 4
+    # Eight passages per request roughly halves provider round trips while the
+    # embedder automatically falls back to the minimum when a payload is too
+    # large for the hosted endpoint.
+    embedding_batch_size: int = 8
+    embedding_min_batch_size: int = 4
     # Shared hosted capacity can return a short-lived 503. Five attempts with
     # backoff provide a 30-second recovery window before a job is failed.
     embedding_retry_attempts: int = 5
     embedding_retry_base_seconds: float = 2.0
+    # Progress is user-facing metadata; cancellation is still checked for
+    # every batch, while these less frequent writes reduce Turso contention.
+    embedding_progress_interval_batches: int = 4
+    embedding_heartbeat_interval_batches: int = 2
     supabase_url: str = ""
     supabase_key: str = ""
     # Supabase remains the authentication provider. All application data is

@@ -78,6 +78,29 @@ async def list_repos(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
 
 
+@router.get("/repos/statuses")
+async def list_repo_statuses(current_user=Depends(get_current_user)):
+    """Return all repository statuses in one tenant-scoped query."""
+    try:
+        await assert_turso_schema()
+        return await get_turso_store().fetch_all(
+            "SELECT r.repo_name, r.status, r.chunk_count, r.error_message, "
+            "COALESCE(c.total_seen_files, 0) AS total_seen_files, COALESCE(c.eligible_files, 0) AS eligible_files, "
+            "COALESCE(c.indexed_files, 0) AS indexed_files, COALESCE(c.excluded_files, 0) AS excluded_files, "
+            "COALESCE(c.excluded_bytes, 0) AS excluded_bytes, COALESCE(c.excluded_reasons, '{}') AS excluded_reasons, "
+            "COALESCE(c.excluded_paths, '[]') AS excluded_paths "
+            "FROM repos r LEFT JOIN repo_coverage c ON c.repo_id = r.id "
+            "WHERE r.user_id = ? "
+            "ORDER BY r.created_at DESC",
+            [current_user.id],
+        )
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Could not list repository statuses")
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
+
+
 @router.delete("/repos/{repo_name}")
 async def delete_repo(repo_name: str, current_user=Depends(get_current_user)):
     try:

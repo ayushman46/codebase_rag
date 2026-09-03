@@ -184,6 +184,32 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
         self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
 
+    def test_embed_chunks_splits_only_a_rejected_batch_without_dropping_chunks(self):
+        from config import settings
+
+        chunks = [
+            {"file_path": f"src/{index}.py", "content": f"value = {index}", "start_line": 1,
+             "end_line": 1, "language": "py"}
+            for index in range(10)
+        ]
+        request_sizes = []
+
+        def fake_embed(texts, *, input_type):
+            self.assertEqual(input_type, "passage")
+            request_sizes.append(len(texts))
+            if len(texts) > 4:
+                raise EmbeddingUnavailableError("payload too large")
+            return [[float(index)] * EMBEDDING_DIMENSION for index in range(len(texts))]
+
+        with patch.object(settings, "embedding_batch_size", 8), \
+             patch.object(settings, "embedding_min_batch_size", 4), \
+             patch("ingest.embedder.embed_texts", side_effect=fake_embed):
+            embedded = embed_chunks(chunks)
+
+        self.assertEqual(request_sizes, [8, 4, 4, 2])
+        self.assertEqual(len(embedded), len(chunks))
+        self.assertTrue(all("embedding" in chunk for chunk in embedded))
+
     def test_ensure_repo_record_queues_failed_repository_without_erasing_old_index(self):
         from ingest.pipeline import ensure_repo_record
         store = MemoryStore()
@@ -398,10 +424,11 @@ class BackendSmokeTests(unittest.TestCase):
         from retrieval.retriever import retrieve_context
         store = MemoryStore()
         schema = [{"id": "schema-1", "file_path": "sql/schema.sql", "start_line": 1, "end_line": 2, "language": "sql", "symbols": [], "content": "CREATE TABLE repos"}]
-        store.fetch_all = AsyncMock(side_effect=[[], schema])
+        store.fetch_all = AsyncMock(return_value=schema)
         with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
             result = asyncio.run(retrieve_context(store, "repo-1", "show sql/schema.sql", top_k=2))
         self.assertEqual([chunk["id"] for chunk in result], ["schema-1"])
+        self.assertEqual(store.fetch_all.await_count, 1)
 
     def test_technical_question_does_not_force_a_readme_citation(self):
         from retrieval.retriever import is_exploratory_repository_question, retrieve_context

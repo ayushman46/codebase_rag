@@ -52,12 +52,18 @@ services:
       - key: EMBEDDING_DIMENSION
         value: "2048"
       - key: EMBEDDING_BATCH_SIZE
+        value: "8"
+      - key: EMBEDDING_MIN_BATCH_SIZE
         value: "4"
       - key: NVIDIA_CALLS_PER_MINUTE
         value: "20"
       - key: EMBEDDING_RETRY_ATTEMPTS
         value: "5"
       - key: EMBEDDING_RETRY_BASE_SECONDS
+        value: "2"
+      - key: EMBEDDING_PROGRESS_INTERVAL_BATCHES
+        value: "4"
+      - key: EMBEDDING_HEARTBEAT_INTERVAL_BATCHES
         value: "2"
       - key: CORS_ORIGINS
         sync: false

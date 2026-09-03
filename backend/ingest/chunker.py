@@ -1,5 +1,6 @@
 import os
 import re
+from bisect import bisect_left
 from typing import Dict, List
 
 MAX_LINES_PER_CHUNK = 150
@@ -82,11 +83,12 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
         
         if start_line == end_line:
             continue
-            
+
         chunk_lines = lines[start_line:end_line]
-        
+        chunk_content = "\n".join(chunk_lines)
+
         # If this detected chunk is still huge, split it manually
-        if len(chunk_lines) > 200 or len("\n".join(chunk_lines)) > MAX_CHARS_PER_CHUNK:
+        if len(chunk_lines) > 200 or len(chunk_content) > MAX_CHARS_PER_CHUNK:
             sub_chunks = split_by_lines(chunk_lines, start_line + 1, rel_path, language)
             chunks.extend(sub_chunks)
         else:
@@ -94,9 +96,9 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
                 "file_path": rel_path,
                 "start_line": start_line + 1,
                 "end_line": end_line,
-                "content": "\n".join(chunk_lines),
+                "content": chunk_content,
                 "language": language,
-                "symbols": extract_symbols("\n".join(chunk_lines)),
+                "symbols": extract_symbols(chunk_content),
             })
             
     # Filter empty chunks
@@ -110,8 +112,10 @@ def split_by_lines(lines: List[str], offset_line: int, file_path: str, language:
     i = 0
     while i < len(lines):
         chunk_lines = lines[i:i + MAX_LINES_PER_CHUNK]
-        while len("\n".join(chunk_lines)) > MAX_CHARS_PER_CHUNK and len(chunk_lines) > 20:
+        chunk_content = "\n".join(chunk_lines)
+        while len(chunk_content) > MAX_CHARS_PER_CHUNK and len(chunk_lines) > 20:
             chunk_lines = chunk_lines[:-10]
+            chunk_content = "\n".join(chunk_lines)
 
         start_line = offset_line + i
         end_line = start_line + len(chunk_lines) - 1
@@ -120,9 +124,9 @@ def split_by_lines(lines: List[str], offset_line: int, file_path: str, language:
             "file_path": file_path,
             "start_line": start_line,
             "end_line": end_line,
-            "content": "\n".join(chunk_lines),
+            "content": chunk_content,
             "language": language,
-            "symbols": extract_symbols("\n".join(chunk_lines)),
+            "symbols": extract_symbols(chunk_content),
         })
         
         if i + MAX_LINES_PER_CHUNK >= len(lines):
@@ -137,11 +141,12 @@ def split_by_characters(content: str, file_path: str, language: str) -> List[Dic
     window = MAX_CHARS_PER_CHUNK
     overlap = 1500
     start_idx = 0
+    newline_offsets = [index for index, character in enumerate(content) if character == "\n"]
 
     while start_idx < len(content):
         end_idx = min(len(content), start_idx + window)
         chunk_text = content[start_idx:end_idx]
-        start_line = content.count("\n", 0, start_idx) + 1
+        start_line = bisect_left(newline_offsets, start_idx) + 1
         line_count = max(1, len(chunk_text.splitlines()))
         end_line = start_line + line_count - 1
 

@@ -9,6 +9,7 @@ facts.
 import os
 import posixpath
 import re
+from bisect import bisect_left
 
 IMPORT_PATTERNS = (
     re.compile(r"^\s*from\s+([.A-Za-z_][\w.]*(?:/[^\s]+)?)(?:\s+import\s+.+)?", re.MULTILINE),
@@ -71,12 +72,16 @@ def build_dependency_manifest(files: list[str], repo_path: str) -> list[dict]:
                 content = handle.read()
         except OSError:
             continue
+        # ``str.count("\n", 0, match.start())`` rescans the complete prefix
+        # for every import. One newline index plus binary search keeps line
+        # number calculation O(file_size + matches log file_size).
+        newline_offsets = [index for index, character in enumerate(content) if character == "\n"]
         for pattern in IMPORT_PATTERNS:
             for match in pattern.finditer(content):
                 target_path = _resolve_import(match.group(1), source_path, known_files)
                 if not target_path or target_path == source_path:
                     continue
-                line_number = content.count("\n", 0, match.start()) + 1
+                line_number = bisect_left(newline_offsets, match.start()) + 1
                 key = (source_path, target_path, line_number)
                 if key in seen:
                     continue

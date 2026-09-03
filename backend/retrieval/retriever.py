@@ -391,6 +391,29 @@ async def requested_file_chunks(store, repo_id: str, file_path: str, limit: int)
     )
 
 
+async def requested_files_chunks(store, repo_id: str, file_paths: list[str], limit: int) -> list[Dict]:
+    """Fetch all explicitly requested files in one database round trip.
+
+    Explicit paths are an exact citation contract: the caller will return only
+    these rows. A single OR query retains the previous per-path candidate
+    budget while avoiding one network round trip per path.
+    """
+    if not file_paths:
+        return []
+    conditions: list[str] = []
+    args: list[object] = [repo_id]
+    for file_path in file_paths:
+        exact_or_suffix = file_path.lower() if "/" in file_path else f"%/{file_path.lower()}"
+        conditions.append("(lower(file_path) = ? OR lower(file_path) LIKE ?)")
+        args.extend([file_path.lower(), exact_or_suffix])
+    args.append(max(1, limit) * len(file_paths))
+    return await store.fetch_all(
+        "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
+        f"WHERE repo_id = ? AND ({' OR '.join(conditions)}) ORDER BY file_path, start_line LIMIT ?",
+        args,
+    )
+
+
 async def path_hint_chunks(
     store,
     repo_id: str,
@@ -405,6 +428,58 @@ async def path_hint_chunks(
         f"WHERE repo_id = ? AND lower(file_path) LIKE ?{overview_filter} ORDER BY file_path, start_line LIMIT ?",
         [repo_id, f"%{hint.lower()}%", limit],
     )
+
+
+async def path_hint_chunks_batch(
+    store,
+    repo_id: str,
+    hints: list[str],
+    limit: int = 2,
+    include_overview_files: bool = False,
+) -> list[Dict]:
+    """Fetch the bounded result for every path hint in one SQL statement.
+
+    The window function applies the same ``LIMIT`` independently to each hint
+    that the former one-query-per-hint implementation used. Rows carry the
+    matching hint so callers can preserve the evidence-plan explanations.
+    """
+    hints = list(dict.fromkeys(hints))
+    if not hints:
+        return []
+    values = ", ".join("(?, ?, ?)" for _ in hints)
+    args: list[object] = []
+    for hint_index, hint in enumerate(hints):
+        args.extend([hint_index, hint, f"%{hint.lower()}%"])
+    args.extend([repo_id, max(1, limit)])
+    overview_filter = "" if include_overview_files else f" AND NOT {overview_file_sql('c')}"
+    try:
+        rows = await store.fetch_all(
+            "WITH hints(hint_order, hint, pattern) AS (VALUES " + values + "), "
+            "ranked AS ("
+            "SELECT c.id, c.file_path, c.start_line, c.end_line, c.language, c.symbols, c.content, "
+            "h.hint AS matched_hint, h.hint_order AS hint_order, "
+            "ROW_NUMBER() OVER (PARTITION BY h.hint ORDER BY c.file_path, c.start_line) AS hint_rank "
+            "FROM chunks c JOIN hints h ON lower(c.file_path) LIKE h.pattern "
+            f"WHERE c.repo_id = ?{overview_filter}) "
+            "SELECT id, file_path, start_line, end_line, language, symbols, content, matched_hint, hint_order "
+            "FROM ranked WHERE hint_rank <= ? ORDER BY hint_order, file_path, start_line",
+            args,
+        )
+        return rows
+    except Exception as error:
+        # Keep repositories created on older SQLite/libSQL versions working;
+        # the compatibility path has identical per-hint ordering and limits.
+        logger.warning("Batched path-hint retrieval unavailable; using compatibility queries (%s)", type(error).__name__)
+        rows: list[Dict] = []
+        for hint_order, hint in enumerate(hints):
+            for chunk in await path_hint_chunks(
+                store, repo_id, hint, limit=limit, include_overview_files=include_overview_files
+            ):
+                row = dict(chunk)
+                row["matched_hint"] = hint
+                row["hint_order"] = hint_order
+                rows.append(row)
+        return rows
 
 
 async def dependent_file_chunks(store, repo_id: str, target_paths: list[str], limit: int = 20) -> list[Dict]:
@@ -432,14 +507,33 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     include_overview_files = include_overview or question_requests_overview_files(query, requested_paths)
     evidence_plan["overview_files_allowed"] = include_overview_files
 
+    # A named file is an exact request. Running broad semantic/keyword searches
+    # here only adds latency because the final evidence contract already
+    # discards those results. Returning an empty set when the path is absent is
+    # also safer than filling the answer with similarly-worded files.
+    if requested_paths:
+        rows = await requested_files_chunks(store, repo_id, requested_paths, top_k)
+        if not rows:
+            return []
+        requested_chunks = []
+        for chunk in sorted(rows, key=lambda item: (item["file_path"], item["start_line"])):
+            enriched = dict(chunk)
+            enriched["_retrieval_methods"] = ["requested_file"]
+            enriched["_retrieval_reasons"] = ["Explicit file path requested in the question"]
+            enriched["_evidence_plan"] = evidence_plan
+            enriched["_relevance_score"] = 2.0
+            requested_chunks.append(enriched)
+        return requested_chunks[:top_k]
+
+    strict_target = is_strict_target_question(query, requested_paths, include_overview_files)
+
     sparse_task = asyncio.create_task(
         sparse_search(store, repo_id, query, plan=evidence_plan, include_overview_files=include_overview_files)
     )
-    file_tasks = [asyncio.create_task(requested_file_chunks(store, repo_id, path, top_k)) for path in requested_paths]
-    plan_tasks = [
-        asyncio.create_task(path_hint_chunks(store, repo_id, hint, include_overview_files=include_overview_files))
-        for hint in evidence_plan.get("path_hints", [])[:8]
-    ]
+    plan_hints = evidence_plan.get("path_hints", [])[:8]
+    plan_task = asyncio.create_task(
+        path_hint_chunks_batch(store, repo_id, plan_hints, include_overview_files=include_overview_files)
+    ) if plan_hints else None
     readme_task = (
         asyncio.create_task(store.fetch_all(
             "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
@@ -453,18 +547,25 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         )) if include_overview else None
     )
 
-    try:
-        query_embedding = await asyncio.to_thread(embed_query, query)
-        dense_task = asyncio.create_task(
-            dense_search(store, repo_id, query_embedding, include_overview_files=include_overview_files)
-        )
-    except (EmbeddingUnavailableError, ModelConfigurationError):
-        logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
-        dense_task = None
+    dense_task = None
+    if not strict_target:
+        try:
+            query_embedding = await asyncio.to_thread(embed_query, query)
+            dense_task = asyncio.create_task(
+                dense_search(store, repo_id, query_embedding, include_overview_files=include_overview_files)
+            )
+        except (EmbeddingUnavailableError, ModelConfigurationError):
+            logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
+    else:
+        # Strict target questions are filtered to the planned path families
+        # below, so exact dense search cannot contribute to the final set.
+        logger.debug("Skipping dense retrieval for strict targeted question")
 
-    pending = [sparse_task, *file_tasks, *plan_tasks]
+    pending = [sparse_task]
     if dense_task:
         pending.insert(0, dense_task)
+    if plan_task:
+        pending.append(plan_task)
     if readme_task:
         pending.append(readme_task)
     if overview_task:
@@ -483,10 +584,8 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     cursor += 1 if dense_task else 0
     sparse_chunks = successful[cursor]
     cursor += 1
-    file_results = successful[cursor:cursor + len(file_tasks)]
-    cursor += len(file_tasks)
-    plan_results = successful[cursor:cursor + len(plan_tasks)]
-    cursor += len(plan_tasks)
+    plan_results = successful[cursor] if plan_task else []
+    cursor += 1 if plan_task else 0
     readme_chunks = successful[cursor] if readme_task else []
     cursor += 1 if readme_task else 0
     overview_chunks = successful[cursor] if overview_task else []
@@ -497,10 +596,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     if not include_overview_files:
         dense_chunks = [chunk for chunk in dense_chunks if not is_overview_file(str(chunk.get("file_path", "")))]
         sparse_chunks = [chunk for chunk in sparse_chunks if not is_overview_file(str(chunk.get("file_path", "")))]
-        plan_results = [
-            [chunk for chunk in rows if not is_overview_file(str(chunk.get("file_path", "")))]
-            for rows in plan_results
-        ]
+        plan_results = [chunk for chunk in plan_results if not is_overview_file(str(chunk.get("file_path", "")))]
 
     def annotate(chunk: Dict, method: str, reason: str) -> Dict:
         enriched = dict(chunk)
@@ -509,24 +605,21 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         enriched["_evidence_plan"] = evidence_plan
         return enriched
 
-    requested_map = {
-        chunk["id"]: annotate(chunk, "requested_file", "Explicit file path requested in the question")
-        for rows in file_results for chunk in rows
-    }
-    requested_chunks = sorted(requested_map.values(), key=lambda chunk: (chunk["file_path"], chunk["start_line"]))
     planned_map: dict[str, Dict] = {}
-    for hint, rows in zip(evidence_plan.get("path_hints", [])[:8], plan_results):
-        for chunk in rows:
-            planned_map[chunk["id"]] = annotate(
-                chunk,
-                "workflow_target",
-                f"Evidence-plan target matching the '{hint}' path hint",
-            )
+    for chunk in plan_results:
+        matched_hint = str(chunk.get("matched_hint") or "path")
+        row = dict(chunk)
+        row.pop("matched_hint", None)
+        row.pop("hint_rank", None)
+        row.pop("hint_order", None)
+        existing = planned_map.get(row["id"], row)
+        planned_map[row["id"]] = annotate(
+            existing,
+            "workflow_target",
+            f"Evidence-plan target matching the '{matched_hint}' path hint",
+        )
     scores: dict[str, float] = {}
     chunk_map: dict[str, Dict] = {}
-    for chunk in requested_chunks:
-        chunk_map[chunk["id"]] = chunk
-        scores[chunk["id"]] = 2.0
     for chunk in planned_map.values():
         chunk_map[chunk["id"]] = chunk
         scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.5
@@ -588,13 +681,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             fallback_by_id.setdefault(chunk["id"], annotate(chunk, "overview", "Repository-wide overview fallback; no direct term match"))
         ranked_chunks = list(fallback_by_id.values())
 
-    requested_ids = {chunk["id"] for chunk in requested_chunks}
-    if requested_chunks:
-        # An explicit path request is an exact citation contract. Do not add
-        # unrelated semantic matches merely to fill ``top_k``.
-        final_chunks = requested_chunks[:top_k]
-    else:
-        final_chunks = select_diverse_chunks(ranked_chunks, top_k, requested_ids)
+    final_chunks = select_diverse_chunks(ranked_chunks, top_k)
     for chunk in final_chunks:
         chunk["_relevance_score"] = round(scores.get(chunk["id"], 0.0), 6)
     return final_chunks

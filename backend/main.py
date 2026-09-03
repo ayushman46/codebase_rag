@@ -12,6 +12,7 @@ from api.ingest_router import router as ingest_router
 from api.query_router import router as query_router
 from api.repos_router import router as repos_router
 from api.billing_router import router as billing_router
+from agent.nemotron import close_async_client
 from ingest.local_worker import process_queue_forever
 
 
@@ -28,6 +29,8 @@ async def lifespan(_app: FastAPI):
             worker_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker_task
+        with suppress(Exception):
+            await close_async_client()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"

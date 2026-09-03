@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import Prism from 'prismjs';
 import 'prismjs/themes/prism-tomorrow.css';
 import 'prismjs/components/prism-python';
@@ -10,9 +10,13 @@ import 'prismjs/components/prism-rust';
 import 'prismjs/components/prism-sql';
 
 const CodeBlock = ({ code, language, file, startLine, retrievalReasons = [] }) => {
+  const codeRef = useRef(null);
+
   useEffect(() => {
-    Prism.highlightAll();
+    if (codeRef.current) Prism.highlightElement(codeRef.current);
   }, [code]);
+
+  const prismLanguage = ({ py: 'python', rb: 'ruby', rs: 'rust', sh: 'bash', yml: 'yaml' }[language] || language || 'javascript');
 
   return (
     <div className="my-3 rounded-[20px] overflow-hidden bg-deep-charcoal border border-charcoal text-pure-white">
@@ -26,7 +30,7 @@ const CodeBlock = ({ code, language, file, startLine, retrievalReasons = [] }) =
         </p>
       )}
       <pre className="p-5 text-sm overflow-x-auto m-0 !bg-transparent font-mono leading-relaxed">
-        <code className={`language-${language || 'javascript'}`}>
+        <code ref={codeRef} className={`language-${prismLanguage}`}>
           {code}
         </code>
       </pre>
@@ -34,4 +38,4 @@ const CodeBlock = ({ code, language, file, startLine, retrievalReasons = [] }) =
   );
 };
 
-export default CodeBlock;
+export default React.memo(CodeBlock);
