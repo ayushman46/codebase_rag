@@ -228,7 +228,7 @@ const RepoList = () => {
                   <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-semibold">
                       {isReady && (
                       <button type="button" onClick={() => setSelectedRepo(repo.repo_name)} className="inline-flex items-center gap-1.5 text-ink-black transition-colors hover:text-ember-orange">
-                        Open chat <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+                        Open chat
                       </button>
                       )}
                     {(repo.status === 'failed' || isCancelled) && (

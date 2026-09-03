@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { cancelIndexing, deleteRepository, getConversation, getRepos, getStatus, getStatuses, queryRepo, reindexRepository, renameRepository } from '../api/client';
+import { cancelIndexing, deleteRepository, getAccountUsage, getConversation, getRepos, getStatus, getStatuses, queryRepo, reindexRepository, renameRepository } from '../api/client';
 import { isSupabaseConfigured, supabase } from '../api/supabase';
 import { isIngestionActive } from '../components/IngestionProgress';
 
@@ -7,6 +7,7 @@ let conversationRequestController = null;
 let queryRequestController = null;
 let statusPollInFlight = false;
 const statusMutationRevisions = new Map();
+let accountUsageRequestRevision = 0;
 
 const useStore = create((set, get) => ({
   repos: [],
@@ -20,8 +21,19 @@ const useStore = create((set, get) => ({
   authError: null,
   reposError: null,
   user: null,
+  accountUsage: null,
+  accountUsageLoading: false,
+  accountUsageError: '',
 
-  setUser: (user) => set({ user }),
+  setUser: (user) => set((state) => {
+    if (state.user?.id === user?.id) return { user };
+    return {
+      user,
+      accountUsage: null,
+      accountUsageLoading: false,
+      accountUsageError: '',
+    };
+  }),
 
   clearAuthError: () => set({ authError: null }),
 
@@ -60,7 +72,8 @@ const useStore = create((set, get) => ({
     try {
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
-      set((state) => ({ user: null, selectedRepo: null, messages: [], repos: [], isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
+      accountUsageRequestRevision += 1;
+      set((state) => ({ user: null, selectedRepo: null, messages: [], repos: [], accountUsage: null, accountUsageLoading: false, accountUsageError: '', isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
     } catch (e) {
       console.error("Sign-out error:", e);
     }
@@ -97,9 +110,42 @@ const useStore = create((set, get) => ({
     try {
       const res = await getRepos();
       set({ repos: res.data, reposError: null });
+      // Keep the profile meter in sync when a repository is added or the
+      // dashboard is first opened. Usage refreshes are deliberately separate
+      // from repository loading so a temporary meter failure never hides the
+      // repository list.
+      if (get().user) void get().fetchAccountUsage({ silent: true });
     } catch (e) {
       console.error(e);
       set({ reposError: 'Could not load your repositories. Please check your connection and try again.' });
+    }
+  },
+
+  fetchAccountUsage: async ({ silent = false } = {}) => {
+    const userId = get().user?.id;
+    if (!userId) {
+      set({ accountUsage: null, accountUsageLoading: false, accountUsageError: '' });
+      return;
+    }
+    const revision = ++accountUsageRequestRevision;
+    if (!silent) set({ accountUsageLoading: true, accountUsageError: '' });
+    try {
+      const res = await getAccountUsage();
+      if (revision !== accountUsageRequestRevision || get().user?.id !== userId) return;
+      set({ accountUsage: res.data, accountUsageLoading: false, accountUsageError: '' });
+    } catch (error) {
+      if (revision !== accountUsageRequestRevision || get().user?.id !== userId) return;
+      const detail = error.response?.data?.detail;
+      const message = typeof detail === 'string' && detail.trim()
+        ? detail
+        : 'Usage information is temporarily unavailable.';
+      // A background refresh must not replace a known-good value with a
+      // transient network error. The profile can continue showing the last
+      // confirmed total and retry on its next visibility/focus refresh.
+      set((state) => ({
+        accountUsageLoading: false,
+        accountUsageError: state.accountUsage ? '' : message,
+      }));
     }
   },
 
@@ -126,15 +172,20 @@ const useStore = create((set, get) => ({
       const updates = (res.data || []).map((data) => ({ repoName: data.repo_name, data }));
       if (get().user?.id !== userId || updates.length === 0) return;
       const byName = new Map(updates.map(({ repoName, data }) => [repoName, data]));
+      let usageChanged = false;
       set((state) => ({
         repos: state.repos.map((repo) => {
           // A re-index/stop mutation may have completed after this poll
           // started. Never let that older response overwrite the user's
           // locally published state.
           if (revisions.get(repo.id) !== (statusMutationRevisions.get(repo.id) || 0)) return repo;
-          return byName.has(repo.repo_name) ? { ...repo, ...byName.get(repo.repo_name) } : repo;
+          if (!byName.has(repo.repo_name)) return repo;
+          const next = { ...repo, ...byName.get(repo.repo_name) };
+          if (next.status !== repo.status && ['ready', 'failed', 'cancelled'].includes(next.status)) usageChanged = true;
+          return next;
         }),
       }));
+      if (usageChanged) void get().fetchAccountUsage({ silent: true });
     } catch (error) {
       if (error.code !== 'ERR_CANCELED') console.error(error);
     } finally {
@@ -162,6 +213,7 @@ const useStore = create((set, get) => ({
         ? { ...item, status: 'cancelled', chunk_count: 0, error_message: 'Indexing stopped by you.' }
         : item),
     }));
+    void get().fetchAccountUsage({ silent: true });
   },
 
   renameRepo: async (repo, nextName) => {
@@ -182,6 +234,7 @@ const useStore = create((set, get) => ({
         ? { selectedRepo: null, messages: [], isHistoryLoading: false }
         : {}),
     }));
+    void get().fetchAccountUsage({ silent: true });
   },
 
   askQuestion: async (question, modelProfile = 'fast', workflow = 'general') => {

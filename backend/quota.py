@@ -28,8 +28,17 @@ def format_bytes(value: int) -> str:
     """Format bytes for concise user-facing account information."""
     value = _as_int(value)
     if value >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.1f} GB"
-    return f"{value / 1_000_000:.0f} MB"
+        amount, unit = value / 1_000_000_000, "GB"
+    elif value >= 1_000_000:
+        amount, unit = value / 1_000_000, "MB"
+    elif value >= 1_000:
+        amount, unit = value / 1_000, "KB"
+    else:
+        return f"{value} bytes"
+    # Preserve the compact labels used in the UI while avoiding the previous
+    # ``0 MB`` result for a small but non-empty repository.
+    rendered = f"{amount:.1f}".rstrip("0").rstrip(".")
+    return f"{rendered} {unit}"
 
 
 async def get_account_usage(store, user_id: str) -> dict[str, Any]:
@@ -63,6 +72,25 @@ async def get_account_usage(store, user_id: str) -> dict[str, Any]:
         [user_id],
     )
     used_bytes = _as_int((usage or {}).get("used_bytes"))
+    # ``repo_files`` was added after the first version of the indexer. Older
+    # ready repositories can therefore have chunks but no manifest rows. Keep
+    # those repositories visible in the account meter instead of reporting
+    # zero until the user happens to re-index them. The fallback measures the
+    # source payload already stored in chunks and is intentionally limited to
+    # repositories that have no manifest, so current indexes are never counted
+    # twice. New indexes always use the exact manifest byte size above.
+    legacy_usage = await store.fetch_one(
+        "SELECT COALESCE(SUM(length(CAST(c.content AS BLOB))), 0) AS used_bytes, "
+        "COUNT(DISTINCT c.repo_id) AS legacy_repositories "
+        "FROM chunks c JOIN repos r ON r.id = c.repo_id "
+        "WHERE r.user_id = ? AND NOT EXISTS ("
+        "SELECT 1 FROM repo_files rf WHERE rf.repo_id = c.repo_id"
+        ")",
+        [user_id],
+    )
+    legacy_bytes = _as_int((legacy_usage or {}).get("used_bytes"))
+    legacy_repositories = _as_int((legacy_usage or {}).get("legacy_repositories"))
+    used_bytes += legacy_bytes
     return {
         "plan": plan,
         "status": status,
@@ -72,6 +100,8 @@ async def get_account_usage(store, user_id: str) -> dict[str, Any]:
         "used_label": format_bytes(used_bytes),
         "quota_label": format_bytes(quota_bytes),
         "remaining_label": format_bytes(max(0, quota_bytes - used_bytes)),
+        "legacy_repositories": legacy_repositories,
+        "usage_estimated": legacy_repositories > 0,
     }
 
 
@@ -94,6 +124,16 @@ async def ensure_repository_usage_capacity(
             [replacing_repo_id],
         )
         current_repo_bytes = _as_int((current or {}).get("used_bytes"))
+        # Apply the same compatibility fallback used by the account meter so
+        # re-indexing a legacy repository does not count its old chunks twice
+        # and get rejected by an otherwise available quota.
+        if current_repo_bytes == 0:
+            legacy_current = await store.fetch_one(
+                "SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) AS used_bytes "
+                "FROM chunks WHERE repo_id = ?",
+                [replacing_repo_id],
+            )
+            current_repo_bytes = _as_int((legacy_current or {}).get("used_bytes"))
     committed_bytes = max(0, usage["used_bytes"] - current_repo_bytes)
     requested_bytes = _as_int(requested_bytes)
     projected_bytes = committed_bytes + requested_bytes

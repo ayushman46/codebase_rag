@@ -48,8 +48,27 @@ OVERVIEW_FILE_NAMES = {
     "changes.md", "license", "license.md", "copying",
 }
 
+# A documentation word can be incidental in an implementation question (for
+# example, "change the navbar; do not cite README.md"). Treat documentation as
+# an evidence scope only when it is the subject of the request. This prevents a
+# negated README mention from widening retrieval and reintroducing README
+# citations beside concrete source files.
+DOCUMENTATION_NAME_PATTERN = (
+    r"(?:readme(?:\.(?:md|rst|txt))?|documentation|docs?|"
+    r"contributing(?:\.(?:md|rst|txt))?|changelog(?:\.(?:md|rst|txt))?|"
+    r"changes\.md|license(?:\.md)?|copying)"
+)
 DOCUMENTATION_REQUEST_PATTERN = re.compile(
-    r"\b(?:readme|documentation|docs?|contributing|changelog|license)\b",
+    rf"(?:^\s*(?:(?:please|can\s+you|could\s+you)\s+)?(?:show|read|open|view|display|summari[sz]e|explain|give|provide|share|list|what(?:\s+(?:is|are|does))?|how(?:\s+(?:does|do|is|are))?|which|where)\b[^.?!]{{0,64}}"
+    rf"\b{DOCUMENTATION_NAME_PATTERN}\b|"
+    rf"^\s*{DOCUMENTATION_NAME_PATTERN}\s*[?.!]*\s*$)",
+    re.IGNORECASE,
+)
+DOCUMENTATION_EXCLUSION_PATTERN = re.compile(
+    r"\b(?:do\s+not|don't|dont|not|without|exclude|excluding|omit|omitting|avoid|ignore|"
+    rf"irrelevant|unrelated)\b.{{0,60}}\b{DOCUMENTATION_NAME_PATTERN}\b|"
+    rf"\b{DOCUMENTATION_NAME_PATTERN}\b.{{0,40}}\b"
+    r"(?:not\s+relevant|irrelevant|unrelated|should\s+not\s+be\s+cited)\b",
     re.IGNORECASE,
 )
 
@@ -57,12 +76,14 @@ DOCUMENTATION_REQUEST_PATTERN = re.compile(
 # such as ``SiteHeader.jsx``. These hints bridge that gap without treating a
 # whole repository as relevant.
 QUESTION_PATH_HINTS = (
+    (re.compile(r"\b(?:frontend|front[- ]?end|user\s+interface|ui|react|component(?:s)?|page(?:s)?|styling|styles?|css)\b", re.IGNORECASE),
+     ("frontend", "front-end", "src", "components", "component", "pages", "page", "ui", "styles", "style", "css", "app")),
     (re.compile(r"\b(?:nav(?:igation)?(?:\s*bar)?|navbar|menu|header)\b", re.IGNORECASE),
      ("nav", "navbar", "navigation", "header", "siteheader")),
     (re.compile(r"\b(?:sidebar|side\s*bar)\b", re.IGNORECASE), ("sidebar", "side-bar")),
     (re.compile(r"\b(?:chat|conversation|message)\b", re.IGNORECASE), ("chat", "conversation", "message")),
-    (re.compile(r"\b(?:authentication|authorization|sign[ -]?in|login|oauth)\b", re.IGNORECASE),
-     ("auth", "login", "signin", "oauth", "session", "security", "middleware", "route", "router", "api", "main", "app", "config")),
+    (re.compile(r"\b(?:auth|authentication|authorization|authenticate|authorize|sign[ -]?in|login|oauth)\b", re.IGNORECASE),
+     ("auth", "authentication", "authorization", "authenticate", "authorize", "authprovider", "identity", "login", "signin", "oauth", "session", "security", "middleware", "route", "router", "api", "main", "app", "config")),
     (re.compile(r"\b(?:api|apis|endpoint|endpoints|route|routes|router|routers|handler|handlers|rest|request|requests)\b", re.IGNORECASE),
      ("api", "apis", "endpoint", "endpoints", "route", "routes", "router", "routers", "handler", "handlers", "server", "main", "app")),
     (re.compile(r"\b(?:database|databases|db|schema|sql|query|queries|migration|migrations)\b", re.IGNORECASE),
@@ -101,6 +122,18 @@ def is_overview_file(file_path: str) -> bool:
     """Return whether a path is orientation/documentation-only evidence."""
     basename = file_path.replace("\\", "/").rsplit("/", 1)[-1].lower()
     return basename in OVERVIEW_FILE_NAMES
+
+
+def is_explicit_overview_request(query: str) -> bool:
+    """Return whether the query directly asks for documentation evidence.
+
+    README/docs paths frequently appear in exclusion instructions or in a
+    sentence explaining that documentation is not the implementation. Only a
+    direct documentation request may opt those files back into retrieval.
+    """
+    if DOCUMENTATION_EXCLUSION_PATTERN.search(query):
+        return False
+    return bool(DOCUMENTATION_REQUEST_PATTERN.search(query))
 
 
 def overview_file_sql(alias: str = "c") -> str:
@@ -168,9 +201,10 @@ EVIDENCE_WORKFLOWS = {
 
 def extract_requested_file_paths(query: str) -> list[str]:
     paths: list[str] = []
+    allow_overview = is_explicit_overview_request(query)
     for match in FILE_PATH_PATTERN.finditer(query):
         path = match.group(1).lstrip("./")
-        if path and path not in paths:
+        if path and (not is_overview_file(path) or allow_overview) and path not in paths:
             paths.append(path)
     return paths
 
@@ -244,7 +278,11 @@ def is_exploratory_repository_question(query: str, requested_paths: list[str]) -
 
 def question_requests_overview_files(query: str, requested_paths: list[str]) -> bool:
     """Allow orientation files only when the user asks for them explicitly."""
-    return any(is_overview_file(path) for path in requested_paths) or bool(DOCUMENTATION_REQUEST_PATTERN.search(query))
+    # A path such as README.md is often mentioned to say what must *not* be
+    # cited. It is not an evidence request in that case.
+    if DOCUMENTATION_EXCLUSION_PATTERN.search(query):
+        return False
+    return any(is_overview_file(path) for path in requested_paths) or is_explicit_overview_request(query)
 
 
 def is_impact_question(query: str) -> bool:
@@ -301,6 +339,10 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
     # paths out of the bounded evidence plan.
     path_hints = list(dict.fromkeys([*extract_question_path_hints(query), *profile["path_hints"]]))[:16]
     requested_files = extract_requested_file_paths(query)
+    overview_allowed = (
+        is_exploratory_repository_question(query, requested_files)
+        or question_requests_overview_files(query, requested_files)
+    )
     if requested_files:
         scope = "explicit_file"
     elif is_narrow_component_question(query):
@@ -321,6 +363,7 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
         "path_hints": path_hints,
         "requested_files": requested_files,
         "query_scope": scope,
+        "overview_files_allowed": overview_allowed,
     }
 
 
@@ -361,7 +404,19 @@ async def sparse_search(
         f"AND ({' OR '.join(matching_parts)}){overview_filter} "
         "ORDER BY score DESC, file_path ASC, start_line ASC LIMIT ?"
     )
-    return await store.fetch_all(sql, [*score_args, repo_id, *score_args, limit])
+    rows = await store.fetch_all(sql, [*score_args, repo_id, *score_args, limit])
+    # The compatibility query uses LIKE for broad SQLite support. LIKE can
+    # mistake a substring in a filename (``capillary.py``) for an API path;
+    # retain such a row only when its content matches a query term or its path
+    # matches one of the evidence-plan tokens on a real boundary.
+    path_hints = (plan or {}).get("path_hints") or []
+    if path_hints:
+        rows = [
+            row for row in rows
+            if any(term in str(row.get("content") or "").lower() for term in terms)
+            or any(path_matches_hints(str(row.get("file_path") or ""), [hint]) for hint in path_hints)
+        ]
+    return rows
 
 
 async def dense_search(
@@ -598,6 +653,16 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         sparse_chunks = [chunk for chunk in sparse_chunks if not is_overview_file(str(chunk.get("file_path", "")))]
         plan_results = [chunk for chunk in plan_results if not is_overview_file(str(chunk.get("file_path", "")))]
 
+    # Path-hint SQL uses a LIKE pattern for portability. Confirm every hint on
+    # path-token boundaries before it can become a citation, even when the
+    # user explicitly asks for documentation. This prevents ``api`` from
+    # matching ``capillary.py`` in a query such as "Show API docs".
+    plan_results = [
+        chunk for chunk in plan_results
+        if not chunk.get("matched_hint")
+        or path_matches_hints(str(chunk.get("file_path", "")), [str(chunk["matched_hint"])])
+    ]
+
     def annotate(chunk: Dict, method: str, reason: str) -> Dict:
         enriched = dict(chunk)
         enriched["_retrieval_methods"] = list(dict.fromkeys([*(enriched.get("_retrieval_methods") or []), method]))
@@ -660,6 +725,20 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.02
         ranked_chunks = [chunk_map[chunk_id] for chunk_id in sorted(scores, key=scores.get, reverse=True)]
 
+    # Enforce the citation boundary once more after every retrieval strategy,
+    # including dependency expansion and compatibility-store fallbacks. A
+    # targeted implementation question must never inherit an overview file
+    # merely because an exploratory classifier matched another phrase.
+    # This is the last source boundary before citations are emitted. It also
+    # covers dependency expansion and stores that do not enforce SQL filters.
+    # Documentation is opt-in only for an explicit README/docs request or a
+    # repository-wide overview question.
+    if not include_overview_files:
+        ranked_chunks = [
+            chunk for chunk in ranked_chunks
+            if not is_overview_file(str(chunk.get("file_path", "")))
+        ]
+
     # For a targeted component or implementation-location question, do not
     # fill the remaining context slots with arbitrary semantic matches. Keep
     # only files whose paths identify the requested area; if no such path is
@@ -678,6 +757,12 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     if include_overview and not ranked_chunks:
         fallback_by_id: dict[str, Dict] = {}
         for chunk in [*readme_chunks, *overview_chunks]:
+            # Do not turn an arbitrary first file in the repository into
+            # evidence for a high-level answer. Only orientation documents
+            # are valid fallback sources; implementation files need a direct
+            # query match before they can be cited.
+            if not is_overview_file(str(chunk.get("file_path", ""))):
+                continue
             fallback_by_id.setdefault(chunk["id"], annotate(chunk, "overview", "Repository-wide overview fallback; no direct term match"))
         ranked_chunks = list(fallback_by_id.values())
 

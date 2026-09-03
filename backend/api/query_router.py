@@ -17,7 +17,7 @@ from agent.nemotron import LLMProviderError
 from api.auth import get_current_user
 from config import ModelConfigurationError, query_request_limiter, settings
 from database import DatabaseConfigurationError, assert_turso_schema, explain_database_error, get_turso_store
-from retrieval.retriever import build_evidence_plan, retrieve_context
+from retrieval.retriever import build_evidence_plan, is_overview_file, retrieve_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -144,6 +144,14 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
                 retrieve_context(store, repo["id"], question, top_k=settings.retrieval_top_k, workflow=workflow),
                 get_conversation_history(store, repo["id"], current_user.id),
             )
+            # Keep the API response aligned with the retrieval evidence
+            # contract. This final boundary protects citations and the LLM
+            # context even if an older/compatibility retrieval path returns a
+            # README or other orientation document for an implementation
+            # question. Explicit documentation and repository-overview
+            # requests opt back in through the evidence plan.
+            if not evidence_plan.get("overview_files_allowed"):
+                chunks = [chunk for chunk in chunks if not is_overview_file(str(chunk.get("file_path", "")))]
             if not chunks:
                 answer, tool_calls, mode, citations = build_no_evidence_response(), [], "repository_guidance", []
             else:

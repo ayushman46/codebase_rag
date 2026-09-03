@@ -10,7 +10,7 @@ const plans = [
     availability: 'Available now',
     price: 'Free',
     detail: 'Everything you need to evaluate a repository and learn the workflow.',
-    features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations'],
+    features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations','upto 1GB of total indexed repositories'],
   },
   {
     name: 'Team',
@@ -53,7 +53,7 @@ const PricingPage = () => {
             <div className="mt-10 border-t border-sand pt-7">
               <h3 className="text-sm font-semibold text-ink-black">What’s included</h3>
               <ul className="mt-5 space-y-4">
-                {plan.features.map((feature) => <li key={feature} className="flex gap-3 text-sm leading-relaxed text-charcoal"><Check className="mt-0.5 h-4 w-4 shrink-0 text-ember-orange" aria-hidden="true" />{feature}</li>)}
+                {plan.features.map((feature) => <li key={feature} className="flex gap-3 text-sm leading-relaxed text-charcoal">{feature}</li>)}
               </ul>
             </div>
           </article>

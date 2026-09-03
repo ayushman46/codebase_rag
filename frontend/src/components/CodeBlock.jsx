@@ -9,7 +9,7 @@ import 'prismjs/components/prism-go';
 import 'prismjs/components/prism-rust';
 import 'prismjs/components/prism-sql';
 
-const CodeBlock = ({ code, language, file, startLine, retrievalReasons = [] }) => {
+const CodeBlock = ({ code, language, file, startLine, endLine, retrievalReasons = [] }) => {
   const codeRef = useRef(null);
 
   useEffect(() => {
@@ -21,7 +21,7 @@ const CodeBlock = ({ code, language, file, startLine, retrievalReasons = [] }) =
   return (
     <div className="my-3 rounded-[20px] overflow-hidden bg-deep-charcoal border border-charcoal text-pure-white">
       <div className="bg-[#242424] px-4 py-3 text-caption font-medium text-stone flex justify-between items-center border-b border-charcoal uppercase tracking-widest">
-        <span>{file} {startLine ? `: L${startLine}` : ''}</span>
+        <span>{file} {startLine ? `: L${startLine}${endLine && endLine !== startLine ? `-L${endLine}` : ''}` : ''}</span>
         <span>{language}</span>
       </div>
       {retrievalReasons.length > 0 && (

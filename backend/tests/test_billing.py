@@ -11,10 +11,21 @@ from pydantic import ValidationError
 
 
 class QuotaStore:
-    def __init__(self, entitlement=None, used_bytes=0, current_repo_bytes=0):
+    def __init__(
+        self,
+        entitlement=None,
+        used_bytes=0,
+        current_repo_bytes=0,
+        legacy_bytes=0,
+        legacy_repositories=0,
+        legacy_repo_bytes=None,
+    ):
         self.entitlement = entitlement
         self.used_bytes = used_bytes
         self.current_repo_bytes = current_repo_bytes
+        self.legacy_bytes = legacy_bytes
+        self.legacy_repositories = legacy_repositories
+        self.legacy_repo_bytes = current_repo_bytes if legacy_repo_bytes is None else legacy_repo_bytes
         self.executed = []
 
     async def fetch_one(self, sql, args=None):
@@ -22,6 +33,10 @@ class QuotaStore:
             return self.entitlement
         if "SUM(rf.byte_size)" in sql:
             return {"used_bytes": self.used_bytes}
+        if "SUM(length(CAST(c.content AS BLOB)))" in sql:
+            return {"used_bytes": self.legacy_bytes, "legacy_repositories": self.legacy_repositories}
+        if "SUM(length(CAST(content AS BLOB)))" in sql:
+            return {"used_bytes": self.legacy_repo_bytes}
         if "SUM(byte_size)" in sql:
             return {"used_bytes": self.current_repo_bytes}
         return None
@@ -58,6 +73,15 @@ class BillingTests(unittest.TestCase):
             asyncio.run(ensure_repository_usage_capacity(store, "user-1", 20_000_000))
         self.assertIn("500 MB", str(context.exception))
 
+    def test_format_bytes_does_not_round_small_index_to_zero(self):
+        from quota import format_bytes
+
+        self.assertEqual(format_bytes(0), "0 bytes")
+        self.assertEqual(format_bytes(999), "999 bytes")
+        self.assertEqual(format_bytes(1_500), "1.5 KB")
+        self.assertEqual(format_bytes(250_000), "250 KB")
+        self.assertEqual(format_bytes(500_000_000), "500 MB")
+
     def test_reindex_excludes_existing_repository_bytes_from_projection(self):
         from quota import ensure_repository_usage_capacity
 
@@ -81,6 +105,29 @@ class BillingTests(unittest.TestCase):
         self.assertEqual(usage["plan"], "explorer")
         self.assertEqual(usage["status"], "expired")
         self.assertEqual(usage["quota_bytes"], 500_000_000)
+
+    def test_usage_includes_legacy_chunks_without_double_counting_manifests(self):
+        from quota import get_account_usage
+
+        store = QuotaStore(used_bytes=12_000, legacy_bytes=4_000, legacy_repositories=1)
+        usage = asyncio.run(get_account_usage(store, "user-1"))
+        self.assertEqual(usage["used_bytes"], 16_000)
+        self.assertEqual(usage["legacy_repositories"], 1)
+        self.assertTrue(usage["usage_estimated"])
+
+    def test_reindex_capacity_subtracts_legacy_repository_chunks(self):
+        from quota import ensure_repository_usage_capacity
+
+        store = QuotaStore(
+            used_bytes=400_000_000,
+            current_repo_bytes=0,
+            legacy_bytes=100_000_000,
+            legacy_repositories=1,
+            legacy_repo_bytes=100_000_000,
+        )
+        # The fallback makes the old indexed payload removable from the
+        # projection, just like a modern repo_files manifest.
+        asyncio.run(ensure_repository_usage_capacity(store, "user-1", 100_000_000, replacing_repo_id="repo-1"))
 
     def test_create_order_uses_fixed_server_amount_and_authenticated_user(self):
         from api.billing_router import CreateOrderRequest, create_order

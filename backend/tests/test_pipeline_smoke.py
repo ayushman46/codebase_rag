@@ -332,6 +332,150 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual([chunk["file_path"] for chunk in result], ["backend/api/routes.py"])
 
+    def test_frontend_editing_question_ignores_negated_readme_reference(self):
+        from retrieval.retriever import extract_requested_file_paths, retrieve_context
+
+        question = "How should I edit the frontend navbar? Do not cite README.md or unrelated docs."
+        self.assertEqual(extract_requested_file_paths(question), [])
+        readme = {
+            "id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 8,
+            "language": "md", "symbols": [], "content": "The navbar is described here.",
+        }
+        navbar = {
+            "id": "navbar-1", "file_path": "frontend/src/components/NavBar.tsx", "start_line": 1,
+            "end_line": 32, "language": "tsx", "symbols": ["NavBar"],
+            "content": "export function NavBar() { return <nav />; }",
+        }
+        unrelated = {
+            "id": "service-1", "file_path": "backend/services/users.py", "start_line": 1,
+            "end_line": 18, "language": "py", "symbols": [], "content": "class UserService: pass",
+        }
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            return [readme, navbar, unrelated]
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", question, top_k=4))
+
+        self.assertEqual([chunk["file_path"] for chunk in result], ["frontend/src/components/NavBar.tsx"])
+
+    def test_frontend_location_question_does_not_widen_to_readme(self):
+        from retrieval.retriever import retrieve_context
+
+        question = "Where is the frontend navbar implemented? Exclude README.md from citations."
+        readme = {
+            "id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 8,
+            "language": "md", "symbols": [], "content": "The navbar is described here.",
+        }
+        navbar = {
+            "id": "navbar-1", "file_path": "frontend/src/components/NavBar.tsx", "start_line": 1,
+            "end_line": 32, "language": "tsx", "symbols": ["NavBar"],
+            "content": "export function NavBar() { return <nav />; }",
+        }
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            return [readme, navbar]
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", question, top_k=4))
+
+        self.assertEqual([chunk["file_path"] for chunk in result], ["frontend/src/components/NavBar.tsx"])
+
+    def test_frontend_editing_question_without_readme_reference_uses_source_paths(self):
+        from retrieval.retriever import build_evidence_plan, retrieve_context
+
+        question = "How do I edit the frontend of this project?"
+        plan = build_evidence_plan(question)
+        self.assertEqual(plan["query_scope"], "targeted_topic")
+        self.assertIn("src", plan["path_hints"])
+
+        readme = {
+            "id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 8,
+            "language": "md", "symbols": [], "content": "Edit the frontend in src/.",
+        }
+        app = {
+            "id": "app-1", "file_path": "src/App.jsx", "start_line": 1, "end_line": 29,
+            "language": "jsx", "symbols": ["App"], "content": "export default function App() { return null; }",
+        }
+        unrelated = {
+            "id": "service-1", "file_path": "backend/services/users.py", "start_line": 1, "end_line": 18,
+            "language": "py", "symbols": [], "content": "class UserService: pass",
+        }
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            if "lower(c.file_path) LIKE ?" in sql or "lower(file_path) LIKE ?" in sql:
+                return [app]
+            return [readme, app, unrelated]
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", question, top_k=4))
+
+        self.assertEqual([chunk["file_path"] for chunk in result], ["src/App.jsx"])
+
+    def test_authentication_path_aliases_keep_common_module_names(self):
+        from retrieval.retriever import build_evidence_plan, path_matches_hints
+
+        plan = build_evidence_plan("How does auth work?")
+        self.assertEqual(plan["query_scope"], "targeted_topic")
+        self.assertTrue(path_matches_hints("src/authentication.py", plan["path_hints"]))
+        self.assertTrue(path_matches_hints("src/authorization.py", plan["path_hints"]))
+
+    def test_path_hint_candidates_use_token_boundaries(self):
+        from retrieval.retriever import retrieve_context
+
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            if "JOIN hints h ON lower(c.file_path) LIKE h.pattern" in sql:
+                return [
+                    {"id": "false", "file_path": "backend/capillary.py", "start_line": 1, "end_line": 2,
+                     "language": "py", "symbols": [], "content": "pass", "matched_hint": "api", "hint_order": 0},
+                    {"id": "true", "file_path": "backend/api/routes.py", "start_line": 1, "end_line": 2,
+                     "language": "py", "symbols": [], "content": "router = APIRouter()", "matched_hint": "api", "hint_order": 0},
+                ]
+            return []
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", "Show API docs", top_k=4))
+        self.assertEqual([chunk["file_path"] for chunk in result], ["backend/api/routes.py"])
+
+    def test_overview_fallback_does_not_cite_arbitrary_first_source_file(self):
+        from retrieval.retriever import retrieve_context
+
+        readme = {
+            "id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 8,
+            "language": "md", "symbols": [], "content": "A repository overview.",
+        }
+        source = {
+            "id": "source-1", "file_path": "src/implementation.py", "start_line": 1, "end_line": 8,
+            "language": "py", "symbols": [], "content": "internal implementation",
+        }
+        store = MemoryStore()
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            if "LIKE '%readme.md'" in sql:
+                return [readme]
+            if "ORDER BY file_path, start_line LIMIT" in sql:
+                return [source]
+            return []
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(store, "repo-1", "What is this project?", top_k=4))
+        self.assertEqual([chunk["file_path"] for chunk in result], ["README.md"])
+
     def test_sparse_terms_ignore_question_stopwords(self):
         from retrieval.retriever import search_terms
 
@@ -462,6 +606,27 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(response["citations"][0]["support_status"], "source-backed")
         self.assertTrue(response["citations"][0]["retrieval_reasons"])
         self.assertEqual(sum("INSERT INTO chat_messages" in sql for sql, _ in store.executed), 2)
+
+    def test_query_endpoint_drops_overview_citations_at_api_boundary(self):
+        from api.query_router import query_repo
+
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="How do I edit the frontend?", model_profile="fast")
+        chunks = [
+            {"id": "readme-1", "file_path": "README.md", "start_line": 1, "end_line": 8,
+             "language": "md", "symbols": [], "content": "The frontend is described here."},
+            {"id": "app-1", "file_path": "src/App.jsx", "start_line": 1, "end_line": 5,
+             "language": "jsx", "symbols": ["App"], "content": "export default function App() {}"},
+        ]
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.get_conversation_history", new=AsyncMock(return_value=[])), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Direct answer\nEdit App.jsx.", []))):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual([citation["file_path"] for citation in response["citations"]], ["src/App.jsx"])
 
     def test_query_response_exposes_the_selected_evidence_workflow(self):
         from api.query_router import query_repo
