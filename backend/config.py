@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # every batch, while these less frequent writes reduce Turso contention.
     embedding_progress_interval_batches: int = 4
     embedding_heartbeat_interval_batches: int = 2
+    # Persisting a few hundred chunks per transaction materially reduces
+    # Turso round trips for large repositories while staying below the
+    # provider's request-size limits. The pipeline still checks cancellation
+    # between batches.
+    chunk_insert_batch_size: int = 250
     supabase_url: str = ""
     supabase_key: str = ""
     # Supabase remains the authentication provider. All application data is
@@ -62,11 +67,11 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # Protect the service from excessively large repository ingestion jobs.
     max_repository_files: int = 5_000
-    max_repository_bytes: int = 25_000_000
+    max_repository_bytes: int = 50_000_000
     # Source files are chunked before embedding, so this is a per-file safety
-    # limit rather than a provider input limit. Five MB covers large source and
-    # schema files while the repository-wide limits below remain in effect.
-    max_file_size_bytes: int = 5_000_000
+    # limit rather than a provider input limit. Twenty MB covers large source
+    # and schema files while the repository-wide limit remains in effect.
+    max_file_size_bytes: int = 20_000_000
     max_repository_chunks: int = 1_500
     # Keep the shared worker and provider capacity fair across signed-in users.
     max_repositories_per_user: int = 30

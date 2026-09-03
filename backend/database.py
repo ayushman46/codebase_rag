@@ -273,7 +273,14 @@ def get_turso_store() -> TursoStore:
         )
     try:
         return TursoStore(url, token)
-    except Exception as error:
+    except BaseException as error:
+        # libsql's Rust TLS layer can raise pyo3_runtime.PanicException when
+        # the host has no usable certificate/keychain (common in local CI and
+        # macOS sandboxes). Convert that panic into the same safe dependency
+        # error as an ordinary connection failure instead of crashing a
+        # request task or taking down the health endpoint.
+        if type(error).__name__ != "PanicException":
+            raise
         raise DatabaseConfigurationError("Could not initialize the Turso database client.") from error
 
 
@@ -308,7 +315,9 @@ async def assert_turso_schema() -> None:
                 )
         except DatabaseConfigurationError:
             raise
-        except Exception as error:
+        except BaseException as error:
+            if type(error).__name__ != "PanicException":
+                raise
             raise DatabaseConfigurationError(
                 "Turso schema is not initialized or is unavailable. Run turso/00_init.sql and turso/02_billing.sql in the Turso SQL shell, "
                 "then restart the backend."

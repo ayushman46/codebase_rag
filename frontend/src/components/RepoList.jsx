@@ -6,6 +6,7 @@ import IngestionProgress, { getIngestionStatus, isIngestionActive } from './Inge
 const RepoList = () => {
   const {
     repos, selectedRepo, setSelectedRepo, reindexRepo, cancelRepoIndexing, renameRepo, deleteRepo,
+    analyzeImpact, clearImpactAnalysis, impactAnalysis, impactAnalysisLoading, impactAnalysisError,
   } = useStore();
   const [openMenuId, setOpenMenuId] = useState(null);
   const [retryingRepoId, setRetryingRepoId] = useState(null);
@@ -13,6 +14,7 @@ const RepoList = () => {
   const [repositoryActionError, setRepositoryActionError] = useState(null);
   const [dialog, setDialog] = useState(null);
   const [draftName, setDraftName] = useState('');
+  const [impactPath, setImpactPath] = useState('');
   const [actionError, setActionError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const dialogRef = useRef(null);
@@ -60,6 +62,7 @@ const RepoList = () => {
     if (!isSavingRef.current) {
       setDialog(null);
       setActionError('');
+      clearImpactAnalysis();
     }
   };
 
@@ -112,6 +115,30 @@ const RepoList = () => {
     setOpenMenuId(null);
     setActionError('');
     setDialog({ type: 'delete', repo });
+  };
+
+  const openImpact = (repo) => {
+    dialogInvokerRef.current = document.activeElement;
+    setOpenMenuId(null);
+    setActionError('');
+    clearImpactAnalysis();
+    setImpactPath('');
+    setDialog({ type: 'impact', repo });
+  };
+
+  const submitImpact = async (event) => {
+    event.preventDefault();
+    const nextPath = impactPath.trim();
+    if (!nextPath) {
+      setActionError('Enter the relative path of the file you want to change.');
+      return;
+    }
+    setActionError('');
+    try {
+      await analyzeImpact(dialog.repo, nextPath);
+    } catch {
+      // The store keeps a safe, actionable error for the dialog.
+    }
   };
 
   const submitRename = async (event) => {
@@ -185,7 +212,10 @@ const RepoList = () => {
                         <Ellipsis className="h-5 w-5" aria-hidden="true" />
                       </button>
                       {openMenuId === repo.id && (
-                        <div role="menu" className="absolute right-0 top-8 z-10 w-36 border border-sand bg-pure-white py-1 text-sm shadow-lg">
+                        <div role="menu" className="absolute right-0 top-8 z-10 w-44 border border-sand bg-pure-white py-1 text-sm shadow-lg">
+                          <button type="button" role="menuitem" onClick={() => openImpact(repo)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-charcoal hover:bg-warm-canvas">
+                            Impact analysis
+                          </button>
                           <button type="button" role="menuitem" onClick={() => openRename(repo)} className="flex w-full items-center gap-2 px-3 py-2 text-left text-charcoal hover:bg-warm-canvas">
                             <Pencil className="h-3.5 w-3.5" aria-hidden="true" /> Rename
                           </button>
@@ -259,17 +289,47 @@ const RepoList = () => {
           <section ref={dialogRef} className="w-full max-w-sm border border-sand bg-pure-white p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="repository-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h3 id="repository-dialog-title" className="text-lg font-semibold tracking-tight text-ink-black">{dialog.type === 'rename' ? 'Rename codebase' : 'Delete codebase'}</h3>
+                <h3 id="repository-dialog-title" className="text-lg font-semibold tracking-tight text-ink-black">
+                  {dialog.type === 'rename' ? 'Rename codebase' : dialog.type === 'impact' ? 'Change impact' : 'Delete codebase'}
+                </h3>
                 <p className="mt-1.5 text-sm leading-relaxed text-pewter">
                   {dialog.type === 'rename'
                     ? 'Choose a clear name for this workspace.'
-                    : `Delete ${dialog.repo.repo_name} and its indexed source and conversation history.`}
+                    : dialog.type === 'impact'
+                      ? `See which indexed files depend on ${dialog.repo.repo_name}.`
+                      : `Delete ${dialog.repo.repo_name} and its indexed source and conversation history.`}
                 </p>
               </div>
               <button type="button" onClick={closeDialog} disabled={isSaving} className="-mr-1 -mt-1 p-1 text-warm-gray hover:text-ink-black" aria-label="Close dialog"><X className="h-4 w-4" /></button>
             </div>
 
-            {dialog.type === 'rename' ? (
+            {dialog.type === 'impact' ? (
+              <div className="mt-5">
+                <form onSubmit={submitImpact}>
+                  <label className="text-xs font-semibold uppercase tracking-wider text-warm-gray" htmlFor="impact-file-path">File to change</label>
+                  <input id="impact-file-path" autoFocus value={impactPath} maxLength={500} autoComplete="off" onChange={(event) => setImpactPath(event.target.value)} placeholder="src/auth.py" className="mt-2 h-11 w-full border border-sand bg-warm-canvas px-3 text-sm text-ink-black outline-none focus:border-stone" />
+                  <p className="mt-2 text-xs leading-relaxed text-warm-gray">We trace only imports resolved to files in this indexed repository.</p>
+                  {(actionError || impactAnalysisError) && <p className="mt-3 text-sm text-red-600" role="alert">{actionError || impactAnalysisError}</p>}
+                  <div className="mt-5 flex justify-end gap-3 text-sm font-semibold">
+                    <button type="button" onClick={closeDialog} disabled={impactAnalysisLoading} className="text-pewter hover:text-ink-black">Close</button>
+                    <button type="submit" disabled={impactAnalysisLoading} className="text-ember-orange hover:text-burnt-rust disabled:opacity-60">{impactAnalysisLoading ? 'Analyzing…' : 'Analyze impact'}</button>
+                  </div>
+                </form>
+                {impactAnalysis && (
+                  <div className="mt-6 border-t border-sand pt-5" aria-live="polite">
+                    <p className="text-sm font-semibold text-ink-black">{impactAnalysis.summary}</p>
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-warm-gray">Indexed target</p>
+                    <p className="mt-1 break-all text-sm text-charcoal">{impactAnalysis.target_files.join(', ')}</p>
+                    <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-warm-gray">Potentially affected files</p>
+                    {impactAnalysis.dependent_files.length > 0 ? (
+                      <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto text-sm text-charcoal">
+                        {impactAnalysis.dependent_files.map((path) => <li key={path} className="break-all">{path}</li>)}
+                      </ul>
+                    ) : <p className="mt-2 text-sm text-pewter">No resolved dependents were found.</p>}
+                  </div>
+                )}
+              </div>
+            ) : dialog.type === 'rename' ? (
               <form className="mt-5" onSubmit={submitRename}>
                 <label className="sr-only" htmlFor="repository-name">Repository name</label>
                 <input id="repository-name" autoFocus value={draftName} maxLength={200} autoComplete="off" onChange={(event) => setDraftName(event.target.value)} className="h-11 w-full border border-sand bg-warm-canvas px-3 text-sm text-ink-black outline-none focus:border-stone" />

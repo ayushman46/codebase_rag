@@ -42,9 +42,36 @@ class BackendSmokeTests(unittest.TestCase):
         client = TestClient(app)
         root = client.get("/")
         self.assertEqual(root.status_code, 200)
-        self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
+        health = client.get("/api/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertIn(health.json()["status"], {"ok", "degraded"})
+        self.assertIn("dependencies", health.json())
+        self.assertTrue(health.headers.get("x-request-id"))
         self.assertEqual(root.headers["x-content-type-options"], "nosniff")
         self.assertIn("frame-ancestors 'none'", root.headers["content-security-policy"])
+
+    def test_readiness_probe_checks_turso_and_nvidia_without_exposing_secrets(self):
+        import main
+
+        class HealthStore:
+            async def fetch_one(self, _sql, _args=None):
+                return {"ok": 1}
+
+        async def run_probe():
+            with patch.object(main, "assert_turso_schema", new=AsyncMock()), \
+                 patch.object(main, "get_turso_store", return_value=HealthStore()), \
+                 patch.object(main.settings, "nvidia_api_key", "test-secret"), \
+                 patch.object(main, "_probe_nvidia_sync", return_value="ok"):
+                return await main._dependency_checks(probe_nvidia=True)
+
+        checks = asyncio.run(run_probe())
+        self.assertEqual(checks, {"turso": {"status": "ok"}, "nvidia": {"status": "ok"}})
+        self.assertNotIn("test-secret", str(checks))
+
+    def test_default_ingestion_limits_are_50mb_repository_and_20mb_file(self):
+        from config import settings
+        self.assertEqual(settings.max_repository_bytes, 50_000_000)
+        self.assertEqual(settings.max_file_size_bytes, 20_000_000)
 
     def test_turso_store_handles_parameterized_rows_and_json_metadata(self):
         from database import TursoStore
@@ -546,6 +573,32 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertIn("repo_dependencies", sql)
         self.assertEqual(args[:3], ["repo-1", "auth.py", "%/auth.py"])
 
+    def test_repository_impact_endpoint_returns_only_resolved_dependents(self):
+        from api.repos_router import repository_impact
+
+        store = MemoryStore()
+        store.fetch_all = AsyncMock(side_effect=[
+            [{"file_path": "src/auth.py"}],
+            [{"source_file": "src/main.py", "target_file": "src/auth.py", "import_name": "src.auth", "line_number": 4}],
+            [{"id": "caller", "file_path": "src/main.py", "start_line": 1, "end_line": 8}],
+        ])
+        user = SimpleNamespace(id="user-1")
+        with patch("api.repos_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.repos_router.get_turso_store", return_value=store), \
+             patch("api.repos_router.owned_repo", new=AsyncMock(return_value={"id": "repo-1"})):
+            response = asyncio.run(repository_impact("demo", "src/auth.py", 20, user))
+
+        self.assertEqual(response["target_files"], ["src/auth.py"])
+        self.assertEqual(response["dependent_files"], ["src/main.py"])
+        self.assertEqual(response["edges"][0]["line_number"], 4)
+
+    def test_repository_impact_rejects_path_traversal(self):
+        from api.repos_router import repository_impact
+        user = SimpleNamespace(id="user-1")
+        with self.assertRaises(Exception) as raised:
+            asyncio.run(repository_impact("demo", "../secrets.env", 20, user))
+        self.assertEqual(getattr(raised.exception, "status_code", None), 422)
+
     def test_worker_claim_keeps_turso_row_as_plain_mapping(self):
         from ingest.pipeline import claim_next_ingestion_job
 
@@ -573,6 +626,17 @@ class BackendSmokeTests(unittest.TestCase):
             result = asyncio.run(retrieve_context(store, "repo-1", "show sql/schema.sql", top_k=2))
         self.assertEqual([chunk["id"] for chunk in result], ["schema-1"])
         self.assertEqual(store.fetch_all.await_count, 1)
+
+    def test_requested_file_paths_escape_like_wildcards(self):
+        from retrieval.retriever import requested_file_chunks
+
+        store = MemoryStore()
+        store.fetch_all = AsyncMock(return_value=[])
+        asyncio.run(requested_file_chunks(store, "repo-1", "src/api_%2Fauth.py", 4))
+        sql, args = store.fetch_all.call_args.args
+        self.assertIn("ESCAPE", sql)
+        self.assertEqual(args[1], "src/api_%2fauth.py")
+        self.assertEqual(args[2], "src/api\\_\\%2fauth.py")
 
     def test_technical_question_does_not_force_a_readme_citation(self):
         from retrieval.retriever import is_exploratory_repository_question, retrieve_context

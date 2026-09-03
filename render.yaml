@@ -65,5 +65,11 @@ services:
         value: "4"
       - key: EMBEDDING_HEARTBEAT_INTERVAL_BATCHES
         value: "2"
+      - key: MAX_REPOSITORY_BYTES
+        value: "50000000"
+      - key: MAX_FILE_SIZE_BYTES
+        value: "20000000"
+      - key: CHUNK_INSERT_BATCH_SIZE
+        value: "250"
       - key: CORS_ORIGINS
         sync: false

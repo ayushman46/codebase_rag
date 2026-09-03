@@ -19,6 +19,7 @@ venv/
 ENV/
 repos_temp/
 frontend/dist/
+frontend/test-results/
 
 # OS files
 .DS_Store

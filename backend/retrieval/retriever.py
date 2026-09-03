@@ -147,6 +147,11 @@ def overview_file_sql(alias: str = "c") -> str:
         parts.extend([f"lower({alias}.file_path) = '{name}'", f"lower({alias}.file_path) LIKE '%/{name}'"])
     return "(" + " OR ".join(parts) + ")"
 
+
+def escape_like(value: str) -> str:
+    """Escape user-derived path text before it is placed in a LIKE argument."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 # Codebases often name authentication modules `auth`, not `authentication`.
 # These small, domain-specific expansions improve keyword retrieval without
 # treating a broad README as proof for an implementation-level answer.
@@ -438,10 +443,10 @@ async def dense_search(
 
 
 async def requested_file_chunks(store, repo_id: str, file_path: str, limit: int) -> list[Dict]:
-    exact_or_suffix = file_path.lower() if "/" in file_path else f"%/{file_path.lower()}"
+    exact_or_suffix = escape_like(file_path.lower()) if "/" in file_path else f"%/{escape_like(file_path.lower())}"
     return await store.fetch_all(
         "SELECT id, file_path, start_line, end_line, language, symbols, content FROM chunks "
-        "WHERE repo_id = ? AND (lower(file_path) = ? OR lower(file_path) LIKE ?) ORDER BY file_path, start_line LIMIT ?",
+        "WHERE repo_id = ? AND (lower(file_path) = ? OR lower(file_path) LIKE ? ESCAPE '\\') ORDER BY file_path, start_line LIMIT ?",
         [repo_id, file_path.lower(), exact_or_suffix, limit],
     )
 
@@ -458,8 +463,8 @@ async def requested_files_chunks(store, repo_id: str, file_paths: list[str], lim
     conditions: list[str] = []
     args: list[object] = [repo_id]
     for file_path in file_paths:
-        exact_or_suffix = file_path.lower() if "/" in file_path else f"%/{file_path.lower()}"
-        conditions.append("(lower(file_path) = ? OR lower(file_path) LIKE ?)")
+        exact_or_suffix = escape_like(file_path.lower()) if "/" in file_path else f"%/{escape_like(file_path.lower())}"
+        conditions.append("(lower(file_path) = ? OR lower(file_path) LIKE ? ESCAPE '\\')")
         args.extend([file_path.lower(), exact_or_suffix])
     args.append(max(1, limit) * len(file_paths))
     return await store.fetch_all(
@@ -544,8 +549,9 @@ async def dependent_file_chunks(store, repo_id: str, target_paths: list[str], li
     target_conditions = []
     target_args = []
     for path in target_paths:
-        target_conditions.append("(d.target_file = ? OR d.target_file LIKE ?)")
-        target_args.extend([path, f"%/{path}"])
+        escaped_path = escape_like(path)
+        target_conditions.append("(d.target_file = ? OR d.target_file LIKE ? ESCAPE '\\')")
+        target_args.extend([path, f"%/{escaped_path}"])
     return await store.fetch_all(
         "SELECT DISTINCT c.id, c.file_path, c.start_line, c.end_line, c.language, c.symbols, c.content "
         "FROM repo_dependencies d JOIN chunks c ON c.repo_id = d.repo_id AND c.file_path = d.source_file "

@@ -88,7 +88,7 @@ The current safety settings allow a maximum of 150 lines per line based chunk wi
 
 ### Dependency evidence
 
-The dependency pass recognizes common import and include forms and resolves them only when the target exists in the same checkout. It stores source file, target file, import name, and line number. Impact questions use this graph as additional evidence and label it separately from ordinary content matches.
+The dependency pass recognizes common import and include forms and resolves them only when the target exists in the same checkout. It stores source file, target file, import name, and line number. Impact questions use this graph as additional evidence and label it separately from ordinary content matches. The repository menu also exposes Change impact, which accepts a relative file path and lists the indexed files that import it. Dynamic and external imports are explicitly reported as outside the graph.
 
 ### Embeddings
 
@@ -97,6 +97,10 @@ The default embedding model is NVIDIA Nemotron 3 Embed 1B. It produces native 2,
 The application keeps a small request budget for interactive questions while indexing. The default application limit is 20 NVIDIA calls per minute, with four calls reserved for queries. This is an application throttle and not a promise about NVIDIA hosted service quotas.
 
 Progress writes are throttled so Turso is not updated after every provider request. Cancellation is still checked before every embedding batch and worker leases continue to receive heartbeats.
+
+### Ingestion performance
+
+File selection, hashing, dependency extraction, and chunking are linear in the selected source size. Local dependency lookups use sets rather than repeated repository scans, and line ranges are calculated with one newline index and binary search. Changed files are chunked with a bounded worker pool, while unchanged files skip chunking and embedding entirely. Chunks are persisted in configurable batches of 250 by default, reducing remote database round trips without changing ordering or evidence. Hosted embedding latency remains the dominant variable because it depends on NVIDIA service capacity.
 
 ### Turso persistence
 
@@ -122,9 +126,9 @@ The defaults are intentionally finite so one user cannot exhaust the worker or d
 
 1. Maximum selected files in one repository: 5,000.
 
-2. Maximum eligible source bytes in one repository: 25 MB.
+2. Maximum eligible source bytes in one repository: 50 MB.
 
-3. Maximum size of one selected source file: 5 MB.
+3. Maximum size of one selected source file: 20 MB.
 
 4. Maximum chunks in one repository: 1,500.
 
@@ -138,7 +142,7 @@ These values are configuration settings, not guarantees of unlimited storage. A 
 
 ### Files that are not indexed
 
-The current policy excludes hidden files, ignored directories, symlinks, lockfiles, minified files, binary or invalid text, unsupported formats, files over 5 MB, and files rejected by the repository safety limits. The coverage report exposes the reason and path for policy exclusions that are detected during selection.
+The current policy excludes hidden files, ignored directories, symlinks, lockfiles, minified files, binary or invalid text, unsupported formats, files over 20 MB, and files rejected by the repository safety limits. The coverage report exposes the reason and path for policy exclusions that are detected during selection.
 
 The worker does not index Git history. It indexes the current shallow checkout. A private GitHub repository is not accepted by the public URL ingestion flow.
 
@@ -210,7 +214,7 @@ The frontend dependencies are defined in frontend/package.json.
 
 ## Repository structure
 
-1. backend/main.py creates the FastAPI application, middleware, health route, and frontend serving.
+1. backend/main.py creates the FastAPI application, request telemetry middleware, health and readiness routes, and frontend serving.
 
 2. backend/api/auth.py validates authenticated Supabase sessions.
 
@@ -351,7 +355,7 @@ cd frontend
 npm run dev
 ```
 
-Open http://localhost:5173. The backend health endpoint is available at http://localhost:8000/api/health.
+Open http://localhost:5173. The backend health endpoint is available at http://localhost:8000/api/health. Deployment readiness, including a live Turso query and a bounded NVIDIA provider probe, is available at http://localhost:8000/api/ready.
 
 The local worker runs inside the FastAPI process by default. It claims one durable Turso job at a time. The worker can be disabled by setting LOCAL_INGESTION_WORKER to false when another worker process is responsible for the queue.
 
@@ -379,35 +383,39 @@ The current flow grants 30 days of access and does not automatically renew. Recu
 
 ## API surface
 
-All routes require a valid Supabase bearer token except the health route.
+All routes require a valid Supabase bearer token except the health and readiness routes.
 
 1. GET /api/health checks service availability.
 
-2. POST /api/ingest validates a public GitHub URL and queues indexing.
+2. GET /api/ready performs a dependency readiness check with a Turso query and bounded NVIDIA provider probe.
 
-3. POST /api/query retrieves evidence and returns a grounded answer.
+3. POST /api/ingest validates a public GitHub URL and queues indexing.
 
-4. GET /api/conversations/{repo_name} restores the owned conversation.
+4. POST /api/query retrieves evidence and returns a grounded answer.
 
-5. GET /api/repos lists repositories owned by the authenticated user.
+5. GET /api/conversations/{repo_name} restores the owned conversation.
 
-6. GET /api/status/{repo_name} returns indexing progress and failure details.
+6. GET /api/repos lists repositories owned by the authenticated user.
 
-7. GET /api/repos/statuses returns status for all owned repositories in one request.
+7. GET /api/status/{repo_name} returns indexing progress and failure details.
 
-8. POST /api/repos/{repo_name}/reindex queues a re index.
+8. GET /api/repos/statuses returns status for all owned repositories in one request.
 
-9. POST /api/repos/{repo_name}/cancel-indexing stops active indexing.
+9. POST /api/repos/{repo_name}/reindex queues a re index.
 
-10. PATCH /api/repos/{repo_name} changes the workspace label.
+10. POST /api/repos/{repo_name}/cancel-indexing stops active indexing.
 
-11. DELETE /api/repos/{repo_name} removes the owned repository and related data.
+11. PATCH /api/repos/{repo_name} changes the workspace label.
 
-12. GET /api/account/usage returns indexed source usage and quota.
+12. DELETE /api/repos/{repo_name} removes the owned repository and related data.
 
-13. POST /api/create-order creates or reuses a Team Razorpay order.
+13. GET /api/repos/{repo_name}/impact?file_path=src/example.py lists indexed files that import a selected file.
 
-14. POST /api/verify-payment verifies payment and activates the entitlement.
+14. GET /api/account/usage returns indexed source usage and quota.
+
+15. POST /api/create-order creates or reuses a Team Razorpay order.
+
+16. POST /api/verify-payment verifies payment and activates the entitlement.
 
 ## Render deployment
 
@@ -432,6 +440,8 @@ After deployment, verify the following flow.
 7. Test cancellation on a repository that takes long enough to show progress.
 
 8. Test Team checkout only with Razorpay test credentials.
+
+9. Open the repository three dot menu, choose Change impact, and enter a relative source path to verify the dependency graph.
 
 ## Reliability and security notes
 
@@ -458,7 +468,7 @@ Build the frontend from the repository root.
 npm --prefix frontend run build
 ```
 
-The tests cover authentication boundaries, Turso storage, vector and keyword fallback behavior, file selection, chunking, exclusion reporting, evidence planning, dependency resolution, payment signature verification, quota enforcement, and guarded asynchronous flows.
+The tests cover authentication boundaries, Turso storage, vector and keyword fallback behavior, file selection, chunking, exclusion reporting, evidence planning, dependency resolution, payment signature verification, quota enforcement, health probes, and guarded asynchronous flows. A CI workflow runs these checks and the frontend build on every push and pull request. The optional browser smoke suite lives in frontend/e2e and the standard library load probe lives in scripts/load_test.py.
 
 ## Contributing
 

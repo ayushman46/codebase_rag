@@ -10,7 +10,7 @@ const plans = [
     availability: 'Available now',
     price: 'Free',
     detail: 'Everything you need to evaluate a repository and learn the workflow.',
-    features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations','upto 1GB of total indexed repositories'],
+    features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations', 'Up to 500 MB of total indexed repositories'],
   },
   {
     name: 'Team',

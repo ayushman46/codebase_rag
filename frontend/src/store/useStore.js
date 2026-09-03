@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { cancelIndexing, deleteRepository, getAccountUsage, getConversation, getRepos, getStatus, getStatuses, queryRepo, reindexRepository, renameRepository } from '../api/client';
+import { cancelIndexing, deleteRepository, getAccountUsage, getConversation, getRepositoryImpact, getRepos, getStatus, getStatuses, queryRepo, reindexRepository, renameRepository } from '../api/client';
 import { isSupabaseConfigured, supabase } from '../api/supabase';
 import { isIngestionActive } from '../components/IngestionProgress';
 
@@ -24,6 +24,9 @@ const useStore = create((set, get) => ({
   accountUsage: null,
   accountUsageLoading: false,
   accountUsageError: '',
+  impactAnalysis: null,
+  impactAnalysisLoading: false,
+  impactAnalysisError: '',
 
   setUser: (user) => set((state) => {
     if (state.user?.id === user?.id) return { user };
@@ -32,10 +35,32 @@ const useStore = create((set, get) => ({
       accountUsage: null,
       accountUsageLoading: false,
       accountUsageError: '',
+      impactAnalysis: null,
+      impactAnalysisLoading: false,
+      impactAnalysisError: '',
     };
   }),
 
   clearAuthError: () => set({ authError: null }),
+
+  analyzeImpact: async (repo, filePath) => {
+    set({ impactAnalysis: null, impactAnalysisLoading: true, impactAnalysisError: '' });
+    try {
+      const response = await getRepositoryImpact(repo.repo_name, filePath);
+      const result = response.data;
+      set({ impactAnalysis: result, impactAnalysisLoading: false });
+      return result;
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      const message = typeof detail === 'string' && detail.trim()
+        ? detail
+        : 'Impact analysis could not be completed. Check the file path and try again.';
+      set({ impactAnalysis: null, impactAnalysisLoading: false, impactAnalysisError: message });
+      throw error;
+    }
+  },
+
+  clearImpactAnalysis: () => set({ impactAnalysis: null, impactAnalysisLoading: false, impactAnalysisError: '' }),
 
   signInWithGoogle: async () => {
     if (!isSupabaseConfigured) {
@@ -73,7 +98,7 @@ const useStore = create((set, get) => ({
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
       accountUsageRequestRevision += 1;
-      set((state) => ({ user: null, selectedRepo: null, messages: [], repos: [], accountUsage: null, accountUsageLoading: false, accountUsageError: '', isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
+      set((state) => ({ user: null, selectedRepo: null, messages: [], repos: [], accountUsage: null, accountUsageLoading: false, accountUsageError: '', impactAnalysis: null, impactAnalysisLoading: false, impactAnalysisError: '', isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
     } catch (e) {
       console.error("Sign-out error:", e);
     }

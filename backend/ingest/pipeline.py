@@ -1,6 +1,7 @@
 """Durable Turso-backed repository ingestion pipeline."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -498,14 +499,32 @@ async def run_ingestion_for_repo(
         await replace_changed_file_chunks(store, repo_id, changed_paths, removed_paths)
 
         def collect_chunks():
+            changed_files = [
+                file_path for file_path in files
+                if os.path.relpath(file_path, repo_path).replace(os.sep, "/") in changed_paths
+            ]
             chunks = []
-            for file_path in files:
-                relative = os.path.relpath(file_path, repo_path).replace(os.sep, "/")
-                if relative not in changed_paths:
-                    continue
-                chunks.extend(chunk_file(file_path, repo_path))
-                if len(chunks) > settings.max_repository_chunks:
-                    raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
+
+            def chunks_for_file(file_path: str) -> list[dict]:
+                return chunk_file(file_path, repo_path)
+
+            # Chunking is independent per file and largely I/O/regex work.
+            # A bounded pool overlaps those passes for repositories with many
+            # changed files without creating one task per file or changing
+            # output order. Small repositories stay on the cheaper serial path.
+            if len(changed_files) >= 8:
+                workers = min(4, max(2, (os.cpu_count() or 2) // 2))
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chunker") as executor:
+                    chunk_groups = executor.map(chunks_for_file, changed_files)
+                    for file_chunks in chunk_groups:
+                        chunks.extend(file_chunks)
+                        if len(chunks) > settings.max_repository_chunks:
+                            raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
+            else:
+                for file_path in changed_files:
+                    chunks.extend(chunks_for_file(file_path))
+                    if len(chunks) > settings.max_repository_chunks:
+                        raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
             return chunks
 
         all_chunks = await run_blocking(collect_chunks)
@@ -541,7 +560,8 @@ async def run_ingestion_for_repo(
                 )
                 embedded_chunks = [{**chunk, "embedding": None} for chunk in all_chunks]
 
-        for offset in range(0, len(embedded_chunks), 100):
+        insert_batch_size = max(1, settings.chunk_insert_batch_size)
+        for offset in range(0, len(embedded_chunks), insert_batch_size):
             await raise_if_ingestion_cancelled(store, repo_id, claim_token)
             await heartbeat_job(store, job_id, claim_token)
             records = [
@@ -551,7 +571,7 @@ async def run_ingestion_for_repo(
                     "language": chunk["language"], "symbols": chunk.get("symbols", []),
                     "content": chunk["content"], "embedding": chunk.get("embedding"),
                 }
-                for chunk in embedded_chunks[offset:offset + 100]
+                for chunk in embedded_chunks[offset:offset + insert_batch_size]
             ]
             await store.insert_chunks(records)
 

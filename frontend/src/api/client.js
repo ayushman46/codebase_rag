@@ -31,6 +31,10 @@ export const getStatus = (repo_name) => api.get(`/status/${encodeURIComponent(re
 export const getStatuses = (config = {}) => api.get('/repos/statuses', config);
 export const cancelIndexing = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/cancel-indexing`);
 export const reindexRepository = (repo_name) => api.post(`/repos/${encodeURIComponent(repo_name)}/reindex`);
+export const getRepositoryImpact = (repo_name, file_path, config = {}) => api.get(
+  `/repos/${encodeURIComponent(repo_name)}/impact`,
+  { params: { file_path, limit: 20 }, ...config },
+);
 export const getAccountUsage = () => api.get('/account/usage');
 export const createTeamOrder = () => api.post('/create-order', { plan: 'team' });
 export const verifyTeamPayment = (payment) => api.post('/verify-payment', payment);

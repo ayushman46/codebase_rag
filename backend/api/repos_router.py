@@ -1,14 +1,16 @@
 """Owned repository management backed by Turso."""
 
 import logging
+import posixpath
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_user
 from database import DatabaseConfigurationError, assert_turso_schema, explain_database_error, get_turso_store
 from ingest.pipeline import ACTIVE_REPOSITORY_STATUSES, IngestionConflictError, enforce_ingestion_capacity, ensure_repo_record, queue_existing_repo
+from retrieval.retriever import dependent_file_chunks
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,6 +22,24 @@ class RenameRepositoryRequest(BaseModel):
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _normalise_impact_path(file_path: str) -> str:
+    """Validate one relative source path before it reaches a SQL LIKE clause."""
+    candidate = file_path.strip().replace("\\", "/")
+    if not candidate or len(candidate) > 500 or "\x00" in candidate:
+        raise HTTPException(status_code=422, detail="Enter a relative source file path.")
+    if candidate.startswith("/"):
+        raise HTTPException(status_code=422, detail="The impact path must be relative to the repository.")
+    normalised = posixpath.normpath(candidate)
+    parts = normalised.split("/")
+    if normalised in {"", "."} or normalised.startswith("../") or ".." in parts:
+        raise HTTPException(status_code=422, detail="The impact path must stay inside the repository.")
+    return normalised
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 async def owned_repo(store, user_id: str, repo_name: str):
@@ -98,6 +118,70 @@ async def list_repo_statuses(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         logger.exception("Could not list repository statuses")
+        raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
+
+
+@router.get("/repos/{repo_name}/impact")
+async def repository_impact(
+    repo_name: str,
+    file_path: str = Query(min_length=1, max_length=500),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user=Depends(get_current_user),
+):
+    """Show the local files that would be affected by changing one source file.
+
+    The graph is deliberately conservative: only imports resolved to another
+    indexed file are returned. External packages and unresolved aliases are
+    omitted instead of being presented as speculative breakage.
+    """
+    target = _normalise_impact_path(file_path)
+    try:
+        await assert_turso_schema()
+        store = get_turso_store()
+        repo = await owned_repo(store, current_user.id, repo_name)
+        escaped = _escape_like(target.lower())
+        target_rows = await store.fetch_all(
+            "SELECT DISTINCT file_path FROM chunks WHERE repo_id = ? AND (lower(file_path) = ? "
+            "OR (lower(file_path) LIKE ? ESCAPE '\\' AND instr(lower(file_path), '/') > 0)) "
+            "ORDER BY file_path LIMIT ?",
+            [repo["id"], target.lower(), f"%/{escaped}", limit],
+        )
+        target_paths = [str(row["file_path"]) for row in target_rows]
+        if not target_paths:
+            raise HTTPException(status_code=404, detail="That source file is not present in the indexed repository.")
+
+        dependency_conditions = []
+        dependency_args = [repo["id"]]
+        for path in target_paths:
+            escaped_path = _escape_like(path)
+            dependency_conditions.append("(d.target_file = ? OR d.target_file LIKE ? ESCAPE '\\')")
+            dependency_args.extend([path, f"%/{escaped_path}"])
+        edges = await store.fetch_all(
+            "SELECT d.source_file, d.target_file, d.import_name, d.line_number "
+            "FROM repo_dependencies d "
+            f"WHERE d.repo_id = ? AND ({' OR '.join(dependency_conditions)}) "
+            "ORDER BY d.source_file, d.line_number, d.target_file LIMIT ?",
+            [*dependency_args, limit * 4],
+        )
+        dependents = await dependent_file_chunks(store, repo["id"], target_paths, limit=limit)
+        dependent_paths = sorted({str(chunk["file_path"]) for chunk in dependents})
+        return {
+            "repository": repo_name,
+            "target_files": target_paths,
+            "dependent_files": dependent_paths,
+            "edges": edges,
+            "summary": (
+                f"{len(dependent_paths)} indexed file(s) import the selected file."
+                if dependent_paths else
+                "No resolved indexed dependents were found. External or dynamic imports are not included."
+            ),
+        }
+    except HTTPException:
+        raise
+    except DatabaseConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Could not analyze repository impact")
         raise HTTPException(status_code=502, detail=explain_database_error(error)) from error
 
 
