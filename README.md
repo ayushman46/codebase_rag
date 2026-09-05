@@ -84,7 +84,7 @@ Every selected file receives a SHA 256 content hash and a byte size. During re i
 
 The chunker reads a source file and preserves its relative path, language, symbols, starting line, ending line, and content. It uses declaration boundaries where possible and bounded line or character windows for large files. Chunk overlap helps preserve context across a boundary.
 
-The current safety settings allow a maximum of 150 lines per line based chunk window, a character ceiling of 12,000 characters per chunk, and a maximum of 1,500 chunks per repository. The NVIDIA embedding model accepts a maximum of 4,096 tokens per input. The worker requests end truncation for inputs that exceed the provider limit, so token aware chunking is a useful future improvement for unusually dense code.
+The current safety settings allow a maximum of 150 lines per line based chunk window, a character ceiling of 12,000 characters per chunk, and a maximum of 3,500 chunks per repository. The worker streams one changed file at a time and releases vectors after each bounded insert batch, keeping peak memory suitable for a 512 MB Render instance.
 
 ### Dependency evidence
 
@@ -126,15 +126,15 @@ The defaults are intentionally finite so one user cannot exhaust the worker or d
 
 1. Maximum selected files in one repository: 5,000.
 
-2. Maximum eligible source bytes in one repository: 50 MB.
+2. Maximum eligible source bytes in one repository: 100 MB.
 
-3. Maximum size of one selected source file: 20 MB.
+3. Maximum size of one selected source file: 50 MB.
 
-4. Maximum chunks in one repository: 1,500.
+4. Maximum chunks in one repository: 3,500.
 
-5. Explorer indexed source quota: 500 MB across the account.
+5. Explorer indexed source quota: 200 MB across the account.
 
-6. Team indexed source quota: 5 GB while the Team entitlement is active.
+6. Team indexed source quota: 800 MB while the Team entitlement is active.
 
 7. Team price in the current configuration: 300 Indian rupees for 30 days.
 
@@ -142,7 +142,7 @@ These values are configuration settings, not guarantees of unlimited storage. A 
 
 ### Files that are not indexed
 
-The current policy excludes hidden files, ignored directories, symlinks, lockfiles, minified files, binary or invalid text, unsupported formats, files over 20 MB, and files rejected by the repository safety limits. The coverage report exposes the reason and path for policy exclusions that are detected during selection.
+The current policy excludes hidden files, ignored directories, symlinks, lockfiles, minified files, binary or invalid text, unsupported formats, files over 50 MB, and files rejected by the repository safety limits. The coverage report exposes the reason and path for policy exclusions that are detected during selection.
 
 The worker does not index Git history. It indexes the current shallow checkout. A private GitHub repository is not accepted by the public URL ingestion flow.
 
@@ -162,7 +162,17 @@ The chat selector provides bounded modes for different goals.
 
 6. Technical due diligence gives a bounded summary of architecture, dependencies, operational concerns, and evidence gaps.
 
+7. Code editing and PR is the only mode that can generate a change proposal or expose the GitHub review action. It asks the code-specialized model for exact search and replace hunks across at most eight explicitly evidenced files, checks every hunk against that file's indexed source, and refuses speculative or partial patches. The complete current files are loaded from GitHub before the proposed hunks are applied. A short lived, file set scoped server ticket is required before the file or PR endpoints can be used.
+
 The modes change evidence priorities and answer structure. They do not create facts that are absent from the repository.
+
+### Reviewed GitHub changes
+
+The Review and Push PR action is available only inside Code editing and PR mode and requires a separate GitHub OAuth connection. Google sign in remains the identity used for the Codebase Intel workspace. When a user opens a review, the server loads the exact current files and their Git blob SHAs, applies only validated exact-match hunks, and lets the user review or edit every complete file before confirming. The server checks that the signed in workspace owns the indexed repository, verifies the GitHub token and file-set editing ticket, validates relative paths and the branch name, checks every file SHA again, creates one atomic commit on a new codebase-intel branch, and opens a pull request. A user with write permission gets a branch in the upstream repository. A user without write permission gets a fork and a pull request targeting the upstream repository. Existing branches are never force updated, and any stale file returns a conflict so the user can refresh and review again.
+
+GitHub OAuth states are opaque, short lived, single use records in Turso. OAuth tokens are encrypted at rest with GITHUB_TOKEN_ENCRYPTION_KEY and are never sent to the browser or written to logs. Editing tickets use EDITING_TICKET_SECRET when set, or the existing GitHub encryption key during a rolling deployment. Set the exact callback URL in the GitHub OAuth App and in GITHUB_REDIRECT_URI. Run turso/04_limits_and_github.sql after the existing schema migrations before enabling the feature.
+
+For an issue-driven change, select Code editing and PR mode and paste the issue number and full issue text, for example `Issue #1428: ...`. The retrieval plan records the issue reference, keeps a bounded hybrid search across implementation files, tests, callers, and configuration, and carries the issue number into the proposed pull request. The patch still appears only when every exact replacement is grounded in the selected repository evidence; if the available evidence cannot support a complete fix, the system refuses to expose a push action.
 
 ## Dependencies
 
@@ -176,15 +186,17 @@ The backend dependencies are installed from backend/requirements.txt.
 
 3. OpenAI provides the client for the OpenAI compatible NVIDIA NIM endpoints.
 
-4. Supabase provides Google session validation.
+4. Code editing mode uses NVIDIA's hosted Qwen2.5 Coder model with a Qwen3 Next catalog fallback when the primary free endpoint is unavailable. Both models use the same provider-neutral client boundary.
 
-5. libsql version 0.1.11 provides the Turso client.
+5. Supabase provides Google session validation.
 
-6. GitPython performs shallow GitHub clones.
+6. libsql version 0.1.11 provides the Turso client.
 
-7. pydantic settings loads and validates environment configuration.
+7. GitPython performs shallow GitHub clones.
 
-8. Razorpay creates Team payment orders and supports server side signature verification.
+8. pydantic settings loads and validates environment configuration.
+
+9. Razorpay creates Team payment orders and supports server side signature verification.
 
 ### Frontend dependencies
 
@@ -309,10 +321,13 @@ NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 NEMOTRON_MODEL=nvidia/nemotron-3-super-120b-a12b
 DETAILED_NEMOTRON_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+CODE_EDITING_MODEL=nvidia/nemotron-3-super-120b-a12b
+CODE_EDITING_FALLBACK_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
 EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 EMBEDDING_DIMENSION=2048
-EMBEDDING_BATCH_SIZE=8
+EMBEDDING_BATCH_SIZE=16
 EMBEDDING_MIN_BATCH_SIZE=4
+EMBEDDING_CHUNK_BUFFER_SIZE=64
 NVIDIA_CALLS_PER_MINUTE=20
 EMBEDDING_RETRY_ATTEMPTS=5
 EMBEDDING_RETRY_BASE_SECONDS=2
@@ -328,14 +343,35 @@ RAZORPAY_KEY_ID=
 RAZORPAY_KEY_SECRET=
 TEAM_PLAN_AMOUNT_PAISE=30000
 TEAM_PLAN_DURATION_DAYS=30
-FREE_CODEBASE_BYTES=500000000
-TEAM_CODEBASE_BYTES=5000000000
+FREE_CODEBASE_BYTES=200000000
+TEAM_CODEBASE_BYTES=800000000
+MAX_REPOSITORY_BYTES=100000000
+MAX_FILE_SIZE_BYTES=50000000
+MAX_REPOSITORY_CHUNKS=3500
+
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GITHUB_REDIRECT_URI=http://localhost:8000/api/github/callback
+GITHUB_FRONTEND_ORIGIN=http://localhost:5173
+# On Render, set GITHUB_REDIRECT_URI to the exact public callback URL:
+# https://your-service.onrender.com/api/github/callback
+# and GITHUB_FRONTEND_ORIGIN to the frontend origin. RENDER_EXTERNAL_URL is
+# used as a safe fallback when the explicit callback is omitted.
+GITHUB_TOKEN_ENCRYPTION_KEY=
+EDITING_TICKET_SECRET=
+EDITING_TICKET_TTL_SECONDS=600
+GITHUB_OAUTH_STATE_TTL_SECONDS=600
+MAX_GITHUB_CHANGE_BYTES=10000000
+GITHUB_EDITOR_MAX_BYTES=2000000
 
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
 VITE_RAZORPAY_KEY_ID=
 VITE_API_BASE_URL=http://localhost:8000/api
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+EDITING_RETRIEVAL_TOP_K=32
+DENSE_CANDIDATE_LIMIT=256
+ANSWER_RETRY_ATTEMPTS=2
 ```
 
 The repository already ignores .env files. Never commit a Turso token, NVIDIA key, Razorpay secret, Supabase service role key, or any private repository credential.

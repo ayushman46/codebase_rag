@@ -36,9 +36,29 @@ services:
       - key: TEAM_PLAN_DURATION_DAYS
         value: "30"
       - key: FREE_CODEBASE_BYTES
-        value: "500000000"
+        value: "200000000"
       - key: TEAM_CODEBASE_BYTES
-        value: "5000000000"
+        value: "800000000"
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_REDIRECT_URI
+        sync: false
+      - key: GITHUB_FRONTEND_ORIGIN
+        sync: false
+      - key: GITHUB_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: EDITING_TICKET_SECRET
+        sync: false
+      - key: EDITING_TICKET_TTL_SECONDS
+        value: "600"
+      - key: GITHUB_OAUTH_STATE_TTL_SECONDS
+        value: "600"
+      - key: MAX_GITHUB_CHANGE_BYTES
+        value: "10000000"
+      - key: GITHUB_EDITOR_MAX_BYTES
+        value: "2000000"
       - key: NVIDIA_API_KEY
         sync: false
       - key: NVIDIA_BASE_URL
@@ -47,14 +67,20 @@ services:
         value: nvidia/nemotron-3-super-120b-a12b
       - key: DETAILED_NEMOTRON_MODEL
         value: nvidia/nemotron-3-ultra-550b-a55b
+      - key: CODE_EDITING_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b
+      - key: CODE_EDITING_FALLBACK_MODEL
+        value: nvidia/nemotron-3.5-lightning-30b-a3b
       - key: EMBEDDING_MODEL
         value: nvidia/nemotron-3-embed-1b
       - key: EMBEDDING_DIMENSION
         value: "2048"
       - key: EMBEDDING_BATCH_SIZE
-        value: "8"
+        value: "16"
       - key: EMBEDDING_MIN_BATCH_SIZE
         value: "4"
+      - key: EMBEDDING_CHUNK_BUFFER_SIZE
+        value: "64"
       - key: NVIDIA_CALLS_PER_MINUTE
         value: "20"
       - key: EMBEDDING_RETRY_ATTEMPTS
@@ -66,10 +92,18 @@ services:
       - key: EMBEDDING_HEARTBEAT_INTERVAL_BATCHES
         value: "2"
       - key: MAX_REPOSITORY_BYTES
-        value: "50000000"
+        value: "100000000"
       - key: MAX_FILE_SIZE_BYTES
-        value: "20000000"
+        value: "50000000"
+      - key: MAX_REPOSITORY_CHUNKS
+        value: "3500"
       - key: CHUNK_INSERT_BATCH_SIZE
         value: "250"
+      - key: EDITING_RETRIEVAL_TOP_K
+        value: "32"
+      - key: DENSE_CANDIDATE_LIMIT
+        value: "256"
+      - key: ANSWER_RETRY_ATTEMPTS
+        value: "2"
       - key: CORS_ORIGINS
         sync: false

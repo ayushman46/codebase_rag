@@ -68,10 +68,10 @@ class BillingTests(unittest.TestCase):
     def test_explorer_quota_blocks_a_repository_before_publish(self):
         from quota import RepositoryQuotaExceededError, ensure_repository_usage_capacity
 
-        store = QuotaStore(used_bytes=490_000_000)
+        store = QuotaStore(used_bytes=190_000_000)
         with self.assertRaises(RepositoryQuotaExceededError) as context:
             asyncio.run(ensure_repository_usage_capacity(store, "user-1", 20_000_000))
-        self.assertIn("500 MB", str(context.exception))
+        self.assertIn("200 MB", str(context.exception))
 
     def test_format_bytes_does_not_round_small_index_to_zero(self):
         from quota import format_bytes
@@ -80,14 +80,14 @@ class BillingTests(unittest.TestCase):
         self.assertEqual(format_bytes(999), "999 bytes")
         self.assertEqual(format_bytes(1_500), "1.5 KB")
         self.assertEqual(format_bytes(250_000), "250 KB")
-        self.assertEqual(format_bytes(500_000_000), "500 MB")
+        self.assertEqual(format_bytes(200_000_000), "200 MB")
 
     def test_reindex_excludes_existing_repository_bytes_from_projection(self):
         from quota import ensure_repository_usage_capacity
 
-        store = QuotaStore(used_bytes=500_000_000, current_repo_bytes=100_000_000)
-        # The replacement is 100 MB, so total usage remains exactly 500 MB.
-        asyncio.run(ensure_repository_usage_capacity(store, "user-1", 100_000_000, replacing_repo_id="repo-1"))
+        store = QuotaStore(used_bytes=200_000_000, current_repo_bytes=50_000_000)
+        # The replacement is 50 MB, so total usage remains exactly 200 MB.
+        asyncio.run(ensure_repository_usage_capacity(store, "user-1", 50_000_000, replacing_repo_id="repo-1"))
 
     def test_expired_team_payment_falls_back_to_explorer_quota(self):
         from quota import get_account_usage
@@ -96,7 +96,7 @@ class BillingTests(unittest.TestCase):
             entitlement={
                 "plan": "team",
                 "status": "active",
-                "quota_bytes": 5_000_000_000,
+                "quota_bytes": 800_000_000,
                 "updated_at": (datetime.now(UTC) - timedelta(days=31)).isoformat(),
             },
             used_bytes=100,
@@ -104,7 +104,7 @@ class BillingTests(unittest.TestCase):
         usage = asyncio.run(get_account_usage(store, "user-1"))
         self.assertEqual(usage["plan"], "explorer")
         self.assertEqual(usage["status"], "expired")
-        self.assertEqual(usage["quota_bytes"], 500_000_000)
+        self.assertEqual(usage["quota_bytes"], 200_000_000)
 
     def test_usage_includes_legacy_chunks_without_double_counting_manifests(self):
         from quota import get_account_usage
@@ -119,15 +119,15 @@ class BillingTests(unittest.TestCase):
         from quota import ensure_repository_usage_capacity
 
         store = QuotaStore(
-            used_bytes=400_000_000,
+            used_bytes=160_000_000,
             current_repo_bytes=0,
-            legacy_bytes=100_000_000,
+            legacy_bytes=40_000_000,
             legacy_repositories=1,
-            legacy_repo_bytes=100_000_000,
+            legacy_repo_bytes=40_000_000,
         )
         # The fallback makes the old indexed payload removable from the
         # projection, just like a modern repo_files manifest.
-        asyncio.run(ensure_repository_usage_capacity(store, "user-1", 100_000_000, replacing_repo_id="repo-1"))
+        asyncio.run(ensure_repository_usage_capacity(store, "user-1", 40_000_000, replacing_repo_id="repo-1"))
 
     def test_create_order_uses_fixed_server_amount_and_authenticated_user(self):
         from api.billing_router import CreateOrderRequest, create_order

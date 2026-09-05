@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     # active parameters than Ultra while retaining long-context coding support.
     nemotron_model: str = "nvidia/nemotron-3-super-120b-a12b"
     detailed_nemotron_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
+    # Dedicated code-review model. Qwen2.5-Coder is served through the same
+    # OpenAI-compatible NVIDIA endpoint and is trained specifically for code
+    # generation, reasoning, and fixing. Keep a second free catalog model as
+    # a provider-side fallback when the primary endpoint is unavailable.
+    # Use models confirmed available to the configured NVIDIA account. The
+    # Super model is trained for coding and long-context agentic work; the
+    # Lightning model is a smaller fallback when the primary is busy.
+    code_editing_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    code_editing_fallback_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     embedding_model: str = "nvidia/nemotron-3-embed-1b"
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
@@ -27,14 +36,23 @@ class Settings(BaseSettings):
     answer_max_tokens: int = 900
     detailed_nvidia_enable_thinking: bool = True
     detailed_answer_max_tokens: int = 1_800
+    code_editing_enable_thinking: bool = False
+    code_editing_answer_max_tokens: int = 2_400
+    code_editing_retry_attempts: int = 3
+    # Interactive answers fail fast enough to keep the chat responsive. Long
+    # embedding jobs retain their separate retry budget below.
+    answer_retry_attempts: int = 2
     # Keep hosted embedding requests deliberately small. Code chunks can be
     # substantially larger than ordinary chat inputs, and large batches are
     # more likely to be rejected by a shared hosted endpoint.
-    # Eight passages per request roughly halves provider round trips while the
-    # embedder automatically falls back to the minimum when a payload is too
-    # large for the hosted endpoint.
-    embedding_batch_size: int = 8
+    # Sixteen passages per request reduces provider round trips. The embedder
+    # adaptively halves a rejected payload and never drops a chunk.
+    embedding_batch_size: int = 16
     embedding_min_batch_size: int = 4
+    # Aggregate chunks from small files before embedding. This avoids one
+    # under-filled provider request per file while keeping peak memory bounded
+    # on the 512 MB Render instance.
+    embedding_chunk_buffer_size: int = 64
     # Shared hosted capacity can return a short-lived 503. Five attempts with
     # backoff provide a 30-second recovery window before a job is failed.
     embedding_retry_attempts: int = 5
@@ -61,18 +79,36 @@ class Settings(BaseSettings):
     team_plan_amount_paise: int = 30_000
     team_plan_duration_days: int = 30
     # Explorer quota is cumulative indexed source across a user's repositories.
-    free_codebase_bytes: int = 500_000_000
+    free_codebase_bytes: int = 200_000_000
     # Team quota is configurable and deliberately finite; do not imply unlimited storage.
-    team_codebase_bytes: int = 5_000_000_000
+    team_codebase_bytes: int = 800_000_000
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # Protect the service from excessively large repository ingestion jobs.
     max_repository_files: int = 5_000
-    max_repository_bytes: int = 50_000_000
+    max_repository_bytes: int = 100_000_000
     # Source files are chunked before embedding, so this is a per-file safety
-    # limit rather than a provider input limit. Twenty MB covers large source
+    # limit rather than a provider input limit. Fifty MB covers large source
     # and schema files while the repository-wide limit remains in effect.
-    max_file_size_bytes: int = 20_000_000
-    max_repository_chunks: int = 1_500
+    max_file_size_bytes: int = 50_000_000
+    max_repository_chunks: int = 3_500
+    # GitHub OAuth & Git Data API integration
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_redirect_uri: str = ""
+    github_frontend_origin: str = ""
+    # Render exposes the canonical public service URL automatically. It lets
+    # GitHub OAuth work safely when the explicit callback variable has not yet
+    # been added to a deployment, without guessing from an untrusted Host
+    # header.
+    render_external_url: str = ""
+    github_oauth_state_ttl_seconds: int = 600
+    github_token_encryption_key: str = ""
+    # Signs short-lived, file-scoped tickets issued only by the editing query
+    # flow. A ticket is required before the GitHub file and PR endpoints act.
+    editing_ticket_secret: str = ""
+    editing_ticket_ttl_seconds: int = 600
+    max_github_change_bytes: int = 10_000_000
+    github_editor_max_bytes: int = 2_000_000
     # Keep the shared worker and provider capacity fair across signed-in users.
     max_repositories_per_user: int = 30
     max_active_ingestion_jobs_per_user: int = 1
@@ -84,6 +120,10 @@ class Settings(BaseSettings):
     # turning each question into an excessively large hosted-model request.
     max_context_characters: int = 40_000
     retrieval_top_k: int = 8
+    editing_retrieval_top_k: int = 32
+    # Dense reranking is restricted to lexical/path candidates so a question
+    # never performs a repository-wide vector sort on Turso.
+    dense_candidate_limit: int = 256
     # Broad architectural questions need a representative sample of the index
     # when no code-term match exists in the user's wording.
     overview_retrieval_candidates: int = 64
@@ -132,8 +172,36 @@ def should_run_local_ingestion_worker() -> bool:
     return settings.local_ingestion_worker
 
 
-def get_answer_model_options(profile: str) -> tuple[str, bool, int]:
+def get_editing_ticket_secret() -> str:
+    """Return the dedicated ticket key, with GitHub's server key as fallback.
+
+    Existing deployments already set GITHUB_TOKEN_ENCRYPTION_KEY for the PR
+    integration. Reusing it only for HMAC signing keeps the new editing mode
+    functional during a rolling deploy; EDITING_TICKET_SECRET can be set to a
+    separate value when operators want independent key rotation.
+    """
+    return settings.editing_ticket_secret.strip() or settings.github_token_encryption_key.strip()
+
+
+def get_answer_model_options(profile: str, workflow: str = "general") -> tuple[str, bool, int]:
     """Resolve an allow-listed chat profile without accepting model IDs from clients."""
+    if workflow == "editing" or profile == "code":
+        # Older Render environments may still carry the previously configured
+        # Qwen/Codestral IDs. They are not served for every NVIDIA account;
+        # transparently use the confirmed Nemotron IDs until those variables
+        # are updated in the dashboard and the service is redeployed.
+        unavailable_ids = {
+            "qwen/qwen2.5-coder-32b-instruct",
+            "qwen/qwen3-next-80b-a3b-instruct",
+            "mistralai/codestral-22b-instruct-v0.1",
+            "deepseek-ai/deepseek-coder-6.7b-instruct",
+        }
+        code_model = settings.code_editing_model if settings.code_editing_model not in unavailable_ids else "nvidia/nemotron-3-super-120b-a12b"
+        return (
+            code_model,
+            settings.code_editing_enable_thinking,
+            settings.code_editing_answer_max_tokens,
+        )
     if profile == "detailed":
         return (
             settings.detailed_nemotron_model,

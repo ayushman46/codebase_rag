@@ -7,7 +7,7 @@ from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from config import nvidia_rate_limiter, require_nvidia_api_key, settings
+from config import ModelConfigurationError, nvidia_rate_limiter, require_nvidia_api_key, settings
 
 
 class LLMProviderError(RuntimeError):
@@ -15,6 +15,7 @@ class LLMProviderError(RuntimeError):
 
 
 _THINKING_BLOCK = re.compile(r"<(?:think|analysis|reasoning)>.*?</(?:think|analysis|reasoning)>", re.IGNORECASE | re.DOTALL)
+_CODE_EDIT_BLOCK = re.compile(r"<code_edit>\s*.*?</code_edit>", re.IGNORECASE | re.DOTALL)
 _FINAL_LABEL = re.compile(
     r"(?ims)^\s*(?:final(?:\s+(?:answer|response))?|assistant\s+response)\s*:\s*(.+)\Z"
 )
@@ -89,14 +90,30 @@ def retry_delay(error: Exception, attempt: int) -> float:
     return min(30.0, settings.embedding_retry_base_seconds * (2 ** attempt))
 
 
+def _can_try_fallback(error: Exception) -> bool:
+    """Allow a configured fallback for outages and retired model IDs only."""
+    if is_transient_provider_error(error):
+        return True
+    return isinstance(error, APIStatusError) and error.status_code in {404, 410}
+
+
 async def complete(
     messages: list[dict[str, Any]],
     *,
     model: str | None = None,
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
+    fallback_models: list[str] | None = None,
+    retry_attempts: int | None = None,
+    structured_output: bool = False,
 ) -> str:
-    """Return final answer content while intentionally discarding private reasoning."""
+    """Return final answer content while intentionally discarding private reasoning.
+
+    ``fallback_models`` is intentionally opt-in. The normal answer path keeps
+    one deterministic model, while code editing can fail over to another
+    allow-listed NVIDIA catalog model when a free endpoint is busy, retired, or
+    temporarily unavailable.
+    """
     api_key = require_nvidia_api_key()
     # Validate configuration before entering the retry loop, then reuse the
     # process-scoped client to avoid a DNS/TLS connection setup on every query.
@@ -104,38 +121,56 @@ async def complete(
         raise ModelConfigurationError("NVIDIA is not configured.")
     client = get_async_client()
     last_error: Exception | None = None
+    model_names = list(dict.fromkeys([model or settings.nemotron_model, *(fallback_models or [])]))
+    attempts = max(1, int(retry_attempts or settings.answer_retry_attempts))
     try:
-        for attempt in range(max(1, settings.embedding_retry_attempts)):
-            try:
-                await nvidia_rate_limiter.acquire()
-                response = await client.chat.completions.create(
-                    model=model or settings.nemotron_model,
-                    messages=messages,
-                    temperature=0.1,
-                    top_p=0.95,
-                    max_tokens=max_tokens or settings.answer_max_tokens,
-                    extra_body={
-                        "chat_template_kwargs": {
-                            "enable_thinking": (
-                                settings.nvidia_enable_thinking if enable_thinking is None else enable_thinking
-                            ),
-                            "force_nonempty_content": True,
+        for model_index, model_name in enumerate(model_names):
+            for attempt in range(attempts):
+                try:
+                    await nvidia_rate_limiter.acquire()
+                    response = await client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=0.1,
+                        top_p=0.95,
+                        max_tokens=max_tokens or settings.answer_max_tokens,
+                        extra_body={
+                            "chat_template_kwargs": {
+                                "enable_thinking": (
+                                    settings.nvidia_enable_thinking if enable_thinking is None else enable_thinking
+                                ),
+                                "force_nonempty_content": True,
+                            },
                         },
-                    },
-                )
-                if not response.choices:
-                    raise LLMProviderError("NVIDIA returned an empty completion.")
-                content = response.choices[0].message.content
-                if not isinstance(content, str) or not content.strip():
-                    raise LLMProviderError("NVIDIA returned a completion without answer content.")
-                return user_facing_content(content)
-            except LLMProviderError:
-                raise
-            except Exception as error:
-                last_error = error
-                if not is_transient_provider_error(error) or attempt == max(1, settings.embedding_retry_attempts) - 1:
-                    break
-                await asyncio.sleep(retry_delay(error, attempt))
+                    )
+                    if not response.choices:
+                        raise LLMProviderError("NVIDIA returned an empty completion.")
+                    content = response.choices[0].message.content
+                    if not isinstance(content, str) or not content.strip():
+                        raise LLMProviderError("NVIDIA returned a completion without answer content.")
+                    if structured_output:
+                        structured = _CODE_EDIT_BLOCK.search(content)
+                        if structured:
+                            # Code editing consumes only the machine-readable
+                            # patch. Any model reasoning or wrapper prose is
+                            # discarded before exact-source validation.
+                            return structured.group(0).strip()
+                    return user_facing_content(content)
+                except LLMProviderError:
+                    raise
+                except Exception as error:
+                    last_error = error
+                    # A retired or invalid model will never recover by
+                    # retrying. Switch to the configured fallback immediately.
+                    if isinstance(error, APIStatusError) and error.status_code in {404, 410}:
+                        break
+                    if not _can_try_fallback(error) or attempt == attempts - 1:
+                        break
+                    await asyncio.sleep(retry_delay(error, attempt))
+            # A fallback is useful only after the primary has exhausted its
+            # retries. Never fall back after auth, validation, or content errors.
+            if model_index < len(model_names) - 1 and not _can_try_fallback(last_error or Exception()):
+                break
 
         if isinstance(last_error, APITimeoutError):
             raise LLMProviderError("NVIDIA timed out while generating the answer after retries.") from last_error

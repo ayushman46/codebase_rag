@@ -6,6 +6,7 @@ external packages and ambiguous aliases are left out rather than presented as
 facts.
 """
 
+import hashlib
 import os
 import posixpath
 import re
@@ -58,38 +59,46 @@ def _resolve_import(raw_target: str, source_path: str, known_files: set[str]) ->
     return None
 
 
-def build_dependency_manifest(files: list[str], repo_path: str) -> list[dict]:
-    known_files = {
-        _normalise(os.path.relpath(path, repo_path))
-        for path in files
-    }
+def _scan_dependency_edges(content: str, source_path: str, known_files: set[str], edges: list[dict], seen: set[tuple[str, str, int]]) -> None:
+    """Append resolved imports for one already-read source file."""
+    newline_offsets = [index for index, character in enumerate(content) if character == "\n"]
+    for pattern in IMPORT_PATTERNS:
+        for match in pattern.finditer(content):
+            target_path = _resolve_import(match.group(1), source_path, known_files)
+            if not target_path or target_path == source_path:
+                continue
+            line_number = bisect_left(newline_offsets, match.start()) + 1
+            key = (source_path, target_path, line_number)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append({
+                "source_file": source_path,
+                "target_file": target_path,
+                "import_name": match.group(1),
+                "line_number": line_number,
+            })
+
+
+def build_manifest_and_dependency_manifest(files: list[str], repo_path: str) -> tuple[dict[str, dict[str, int | str]], list[dict]]:
+    """Hash files and resolve local imports in one bounded read pass."""
+    known_files = {_normalise(os.path.relpath(path, repo_path)) for path in files}
+    manifest: dict[str, dict[str, int | str]] = {}
     edges: list[dict] = []
     seen: set[tuple[str, str, int]] = set()
     for file_path in files:
         source_path = _normalise(os.path.relpath(file_path, repo_path))
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
-                content = handle.read()
+            with open(file_path, "rb") as handle:
+                raw_content = handle.read()
         except OSError:
             continue
-        # ``str.count("\n", 0, match.start())`` rescans the complete prefix
-        # for every import. One newline index plus binary search keeps line
-        # number calculation O(file_size + matches log file_size).
-        newline_offsets = [index for index, character in enumerate(content) if character == "\n"]
-        for pattern in IMPORT_PATTERNS:
-            for match in pattern.finditer(content):
-                target_path = _resolve_import(match.group(1), source_path, known_files)
-                if not target_path or target_path == source_path:
-                    continue
-                line_number = bisect_left(newline_offsets, match.start()) + 1
-                key = (source_path, target_path, line_number)
-                if key in seen:
-                    continue
-                seen.add(key)
-                edges.append({
-                    "source_file": source_path,
-                    "target_file": target_path,
-                    "import_name": match.group(1),
-                    "line_number": line_number,
-                })
-    return sorted(edges, key=lambda edge: (edge["source_file"], edge["line_number"], edge["target_file"]))
+        manifest[source_path] = {"content_hash": hashlib.sha256(raw_content).hexdigest(), "byte_size": len(raw_content)}
+        _scan_dependency_edges(raw_content.decode("utf-8", errors="ignore"), source_path, known_files, edges, seen)
+    return manifest, sorted(edges, key=lambda edge: (edge["source_file"], edge["line_number"], edge["target_file"]))
+
+
+def build_dependency_manifest(files: list[str], repo_path: str) -> list[dict]:
+    """Build a dependency graph for callers that do not need file hashes."""
+    _manifest, dependencies = build_manifest_and_dependency_manifest(files, repo_path)
+    return dependencies

@@ -17,6 +17,7 @@ from api.ingest_router import router as ingest_router
 from api.query_router import router as query_router
 from api.repos_router import router as repos_router
 from api.billing_router import router as billing_router
+from api.github_router import router as github_router
 from agent.nemotron import close_async_client
 from database import DatabaseConfigurationError, assert_turso_schema, get_turso_store
 from ingest.local_worker import process_queue_forever
@@ -60,13 +61,17 @@ app.add_middleware(
     allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    # The editing review endpoint carries a short-lived, file-scoped ticket
+    # in this header. Without it, the browser rejects the cross-origin
+    # preflight before FastAPI can validate the ticket or call GitHub.
+    allow_headers=["Authorization", "Content-Type", "X-Editing-Ticket"],
 )
 
 app.include_router(ingest_router, prefix="/api")
 app.include_router(query_router, prefix="/api")
 app.include_router(repos_router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
+app.include_router(github_router, prefix="/api")
 
 
 @app.middleware("http")
@@ -82,12 +87,16 @@ async def add_security_headers(request: Request, call_next):
         raise
     # The SPA uses only same-origin scripts and API calls. Supabase is needed
     # for OAuth/session traffic and remote HTTPS avatars are permitted.
+    # The transient GitHub OAuth popup supplies its own nonce-based CSP. The
+    # SPA itself uses only bundled self-hosted scripts.
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; connect-src 'self' https://*.supabase.co https://checkout.razorpay.com https://api.razorpay.com; "
-        "img-src 'self' https: data:; style-src 'self'; "
+        "default-src 'self'; "
+        "connect-src 'self' https://*.supabase.co https://checkout.razorpay.com https://api.razorpay.com https://api.github.com https://github.com; "
+        "img-src 'self' https: data:; "
+        "style-src 'self' 'unsafe-inline'; "
         "script-src 'self' https://checkout.razorpay.com; "
-        "frame-src https://checkout.razorpay.com https://api.razorpay.com; "
+        "frame-src https://checkout.razorpay.com https://api.razorpay.com https://github.com; "
         "base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
     )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")

@@ -152,7 +152,7 @@ CREATE INDEX IF NOT EXISTS chat_messages_by_repo_user ON chat_messages(repo_id, 
 CREATE TABLE IF NOT EXISTS account_entitlements (
   user_id TEXT PRIMARY KEY,
   plan TEXT NOT NULL DEFAULT 'explorer' CHECK (plan IN ('explorer', 'team')),
-  quota_bytes INTEGER NOT NULL DEFAULT 500000000 CHECK (quota_bytes > 0),
+  quota_bytes INTEGER NOT NULL DEFAULT 200000000 CHECK (quota_bytes > 0),
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'past_due', 'cancelled')),
   razorpay_order_id TEXT,
   razorpay_payment_id TEXT,
@@ -173,3 +173,38 @@ CREATE TABLE IF NOT EXISTS billing_orders (
 );
 
 CREATE INDEX IF NOT EXISTS billing_orders_user_status ON billing_orders(user_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS user_github_tokens (
+  user_id TEXT PRIMARY KEY,
+  github_user_id TEXT,
+  github_username TEXT NOT NULL,
+  access_token TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS user_github_tokens_username ON user_github_tokens(github_username);
+
+CREATE TABLE IF NOT EXISTS github_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  redirect_to TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS github_oauth_states_expiry ON github_oauth_states(expires_at);
+
+CREATE TABLE IF NOT EXISTS github_change_operations (
+  operation_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  repo_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('processing', 'completed', 'failed')),
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS github_change_operations_user ON github_change_operations(user_id, created_at);

@@ -38,3 +38,15 @@ export const getRepositoryImpact = (repo_name, file_path, config = {}) => api.ge
 export const getAccountUsage = () => api.get('/account/usage');
 export const createTeamOrder = () => api.post('/create-order', { plan: 'team' });
 export const verifyTeamPayment = (payment) => api.post('/verify-payment', payment);
+export const getGithubStatus = () => api.get('/github/status');
+export const getGithubLoginUrl = (redirectTo = '/dashboard') => api.get('/github/login', { params: { redirect_to: redirectTo } });
+export const disconnectGithub = () => api.post('/github/disconnect');
+export const getGithubFile = (repoName, filePath, editTicket = '', config = {}) => {
+  const { headers = {}, ...rest } = config;
+  return api.get('/github/file', {
+    ...rest,
+    params: { repo_name: repoName, file_path: filePath },
+    headers: { ...headers, 'X-Editing-Ticket': editTicket },
+  });
+};
+export const pushGithubPR = (payload) => api.post('/github/push-pr', payload);

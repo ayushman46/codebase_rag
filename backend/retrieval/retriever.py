@@ -37,6 +37,7 @@ IMPACT_QUESTION_PATTERN = re.compile(
     r"\bif\s+.+\s+(?:changes?|is\s+removed|is\s+renamed)\b",
     re.IGNORECASE,
 )
+ISSUE_REFERENCE_PATTERN = re.compile(r"\b(?:github\s+)?issue\s*#?\s*(\d{1,8})\b", re.IGNORECASE)
 
 # These files are useful for repository-wide orientation, but they are not
 # implementation evidence for a targeted question. Keep them out of normal
@@ -201,6 +202,12 @@ EVIDENCE_WORKFLOWS = {
         "terms": ("license", "readme", "deploy", "docker", "config", "dependency", "test", "ci", "security"),
         "path_hints": ("license", "readme", "docker", "deploy", "config", "test", "ci", "package"),
     },
+    "editing": {
+        "label": "Code editing and PR",
+        "focus": "Review one explicitly named source file and propose the smallest exact-match change that fixes the request.",
+        "terms": ("fix", "bug", "change", "edit", "patch", "review", "test", "validation"),
+        "path_hints": (),
+    },
 }
 
 
@@ -294,6 +301,12 @@ def is_impact_question(query: str) -> bool:
     return bool(IMPACT_QUESTION_PATTERN.search(query))
 
 
+def extract_issue_reference(query: str) -> str | None:
+    """Return a bounded GitHub issue number when the user supplies one."""
+    match = ISSUE_REFERENCE_PATTERN.search(str(query or ""))
+    return match.group(1) if match else None
+
+
 def select_diverse_chunks(candidates: list[Dict], limit: int, excluded_ids: set[str] | None = None) -> list[Dict]:
     excluded_ids = excluded_ids or set()
     selected: list[Dict] = []
@@ -344,11 +357,14 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
     # paths out of the bounded evidence plan.
     path_hints = list(dict.fromkeys([*extract_question_path_hints(query), *profile["path_hints"]]))[:16]
     requested_files = extract_requested_file_paths(query)
+    issue_reference = extract_issue_reference(query)
     overview_allowed = (
         is_exploratory_repository_question(query, requested_files)
         or question_requests_overview_files(query, requested_files)
     )
-    if requested_files:
+    if issue_reference:
+        scope = "issue"
+    elif requested_files:
         scope = "explicit_file"
     elif is_narrow_component_question(query):
         scope = "targeted_component"
@@ -367,6 +383,7 @@ def build_evidence_plan(query: str, workflow: str = "general") -> dict:
         "search_terms": terms,
         "path_hints": path_hints,
         "requested_files": requested_files,
+        "issue_reference": issue_reference,
         "query_scope": scope,
         "overview_files_allowed": overview_allowed,
     }
@@ -430,15 +447,53 @@ async def dense_search(
     query_embedding: list[float],
     limit: int = 20,
     include_overview_files: bool = False,
+    candidate_terms: list[str] | None = None,
+    candidate_limit: int | None = None,
 ) -> list[Dict]:
-    """Use Turso's native cosine-distance function; query filtering preserves tenant isolation."""
+    """Dense-rerank a bounded lexical candidate set.
+
+    Turso does not provide a usable ANN index for the current 2048-dimensional
+    embeddings.  Running cosine distance over every chunk makes each question
+    proportional to the whole repository.  Candidate-first retrieval keeps
+    semantic reranking bounded while sparse retrieval remains the fallback for
+    genuinely semantic queries with no lexical hit.
+    """
     import json
     overview_filter = "" if include_overview_files else f" AND NOT {overview_file_sql('chunks')}"
+    terms = list(dict.fromkeys(
+        str(term).strip().lower() for term in (candidate_terms or [])
+        if str(term).strip()
+    ))[:20]
+    if not terms:
+        return []
+    candidate_limit = max(limit, min(settings.dense_candidate_limit, int(candidate_limit or settings.dense_candidate_limit)))
+    matching_parts = ["(lower(content) LIKE ? OR lower(file_path) LIKE ?)" for _ in terms]
+    term_args = [value for term in terms for value in (f"%{term}%", f"%{term}%")]
+    candidate_rows = await store.fetch_all(
+        "SELECT id FROM chunks WHERE repo_id = ? AND embedding IS NOT NULL"
+        f"{overview_filter} AND ({' OR '.join(matching_parts)}) LIMIT ?",
+        [repo_id, *term_args, candidate_limit],
+    )
+    ids = [row.get("id") for row in candidate_rows if row.get("id")]
+    if not ids:
+        # Preserve semantic recall for a genuinely abstract question whose
+        # terms occur nowhere in source. This is the exceptional slow path;
+        # ordinary questions use the bounded candidate query above, while
+        # sparse/overview retrieval still supplies a safe fallback.
+        return await store.fetch_all(
+            "SELECT id, file_path, start_line, end_line, language, symbols, content, "
+            "vector_distance_cos(embedding, vector32(?)) AS distance "
+            f"FROM chunks WHERE repo_id = ? AND embedding IS NOT NULL{overview_filter} "
+            "ORDER BY distance ASC LIMIT ?",
+            [json.dumps(query_embedding), repo_id, limit],
+        )
+    placeholders = ",".join("?" for _ in ids)
     return await store.fetch_all(
         "SELECT id, file_path, start_line, end_line, language, symbols, content, "
         "vector_distance_cos(embedding, vector32(?)) AS distance "
-        f"FROM chunks WHERE repo_id = ? AND embedding IS NOT NULL{overview_filter} ORDER BY distance ASC LIMIT ?",
-        [json.dumps(query_embedding), repo_id, limit],
+        f"FROM chunks WHERE repo_id = ? AND id IN ({placeholders}) AND embedding IS NOT NULL{overview_filter} "
+        "ORDER BY distance ASC LIMIT ?",
+        [json.dumps(query_embedding), repo_id, *ids, limit],
     )
 
 
@@ -567,13 +622,18 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     evidence_plan = build_evidence_plan(query, workflow)
     include_overview_files = include_overview or question_requests_overview_files(query, requested_paths)
     evidence_plan["overview_files_allowed"] = include_overview_files
+    editing_mode = workflow == "editing"
 
     # A named file is an exact request. Running broad semantic/keyword searches
     # here only adds latency because the final evidence contract already
     # discards those results. Returning an empty set when the path is absent is
     # also safer than filling the answer with similarly-worded files.
     if requested_paths:
-        rows = await requested_files_chunks(store, repo_id, requested_paths, top_k)
+        # Editing needs the complete bounded set of chunks for the named file
+        # so the model can form exact search/replace hunks. Normal questions
+        # retain their small citation budget and latency.
+        per_file_limit = settings.editing_retrieval_top_k if editing_mode else top_k
+        rows = await requested_files_chunks(store, repo_id, requested_paths, per_file_limit)
         if not rows:
             return []
         requested_chunks = []
@@ -584,9 +644,14 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             enriched["_evidence_plan"] = evidence_plan
             enriched["_relevance_score"] = 2.0
             requested_chunks.append(enriched)
-        return requested_chunks[:top_k]
+        return requested_chunks[: per_file_limit * len(requested_paths)]
 
-    strict_target = is_strict_target_question(query, requested_paths, include_overview_files)
+    # Issue text often mentions one subsystem while the actual fix also needs
+    # tests, configuration, callers, or a dependency. Keep the bounded hybrid
+    # retrieval set broad for an explicit issue reference; ordinary targeted
+    # questions retain their strict path-family citation contract.
+    issue_request = bool(evidence_plan.get("issue_reference"))
+    strict_target = is_strict_target_question(query, requested_paths, include_overview_files) and not issue_request
 
     sparse_task = asyncio.create_task(
         sparse_search(store, repo_id, query, plan=evidence_plan, include_overview_files=include_overview_files)
@@ -613,7 +678,13 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         try:
             query_embedding = await asyncio.to_thread(embed_query, query)
             dense_task = asyncio.create_task(
-                dense_search(store, repo_id, query_embedding, include_overview_files=include_overview_files)
+                dense_search(
+                    store,
+                    repo_id,
+                    query_embedding,
+                    include_overview_files=include_overview_files,
+                    candidate_terms=[*evidence_plan.get("search_terms", []), *evidence_plan.get("path_hints", [])],
+                )
             )
         except (EmbeddingUnavailableError, ModelConfigurationError):
             logger.warning("NVIDIA query embedding unavailable; falling back to keyword retrieval")
@@ -749,7 +820,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     # fill the remaining context slots with arbitrary semantic matches. Keep
     # only files whose paths identify the requested area; if no such path is
     # present, returning no evidence is safer than citing unrelated files.
-    if not requested_paths and is_strict_target_question(query, requested_paths, include_overview_files):
+    if not requested_paths and is_strict_target_question(query, requested_paths, include_overview_files) and not issue_request:
         target_hints = extract_question_path_hints(query)
         targeted_chunks = [
             chunk for chunk in ranked_chunks

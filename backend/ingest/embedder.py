@@ -76,8 +76,14 @@ def embed_texts(texts: List[str], *, input_type: str) -> List[List[float]]:
     for attempt in range(attempts):
         try:
             wait_for_embedding_slot(input_type)
+            embedding_model = settings.embedding_model
+            # The retired E5/NVIDIA model was previously used by this project.
+            # Keep old Render environment values from breaking re-indexing;
+            # the current 2048-dimensional model is the safe replacement.
+            if embedding_model in {"nvidia/nv-embedqa-e5-v5", "nvidia/nv-embedqa-e5-v5:latest"}:
+                embedding_model = "nvidia/nemotron-3-embed-1b"
             response = get_embedding_client().embeddings.create(
-                model=settings.embedding_model,
+                model=embedding_model,
                 input=texts,
                 extra_body={"input_type": input_type, "truncate": "END"},
             )

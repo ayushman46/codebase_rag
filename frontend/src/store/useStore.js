@@ -8,6 +8,7 @@ let queryRequestController = null;
 let statusPollInFlight = false;
 const statusMutationRevisions = new Map();
 let accountUsageRequestRevision = 0;
+let reposRequestRevision = 0;
 
 const useStore = create((set, get) => ({
   repos: [],
@@ -16,6 +17,7 @@ const useStore = create((set, get) => ({
   isQuerying: false,
   queryEpoch: 0,
   isHistoryLoading: false,
+  historyError: '',
   isIngesting: false,
   isSigningIn: false,
   authError: null,
@@ -110,21 +112,21 @@ const useStore = create((set, get) => ({
     conversationRequestController = null;
     queryRequestController = null;
     if (!repoName) {
-      set((state) => ({ selectedRepo: null, messages: [], isHistoryLoading: false, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
+      set((state) => ({ selectedRepo: null, messages: [], isHistoryLoading: false, historyError: '', isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
       return;
     }
-    set((state) => ({ selectedRepo: repoName, messages: [], isHistoryLoading: true, isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
+    set((state) => ({ selectedRepo: repoName, messages: [], isHistoryLoading: true, historyError: '', isQuerying: false, queryEpoch: state.queryEpoch + 1 }));
     const controller = new AbortController();
     conversationRequestController = controller;
     try {
       const res = await getConversation(repoName, { signal: controller.signal });
       if (get().selectedRepo === repoName) {
-        set({ messages: res.data.messages || [], isHistoryLoading: false });
+        set({ messages: res.data.messages || [], isHistoryLoading: false, historyError: '' });
       }
     } catch (e) {
       if (e.code !== 'ERR_CANCELED' && e.name !== 'CanceledError') console.error(e);
       if (conversationRequestController === controller && get().selectedRepo === repoName) {
-        set({ messages: [], isHistoryLoading: false });
+        set({ isHistoryLoading: false, historyError: 'Conversation history could not be loaded. Try again.' });
       }
     } finally {
       if (conversationRequestController === controller) conversationRequestController = null;
@@ -132,8 +134,11 @@ const useStore = create((set, get) => ({
   },
 
   fetchRepos: async () => {
+    const revision = ++reposRequestRevision;
+    const userId = get().user?.id;
     try {
       const res = await getRepos();
+      if (revision !== reposRequestRevision || get().user?.id !== userId) return;
       set({ repos: res.data, reposError: null });
       // Keep the profile meter in sync when a repository is added or the
       // dashboard is first opened. Usage refreshes are deliberately separate
@@ -142,7 +147,9 @@ const useStore = create((set, get) => ({
       if (get().user) void get().fetchAccountUsage({ silent: true });
     } catch (e) {
       console.error(e);
-      set({ reposError: 'Could not load your repositories. Please check your connection and try again.' });
+      if (revision === reposRequestRevision && get().user?.id === userId) {
+        set({ reposError: 'Could not load your repositories. Please check your connection and try again.' });
+      }
     }
   },
 
@@ -291,6 +298,8 @@ const useStore = create((set, get) => ({
         model_profile: data.model_profile,
         workflow: data.workflow,
         evidence_plan: data.evidence_plan,
+        edit_suggestion: data.edit_suggestion,
+        edit_ticket: data.edit_ticket,
       };
       
       set((state) => (

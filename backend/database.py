@@ -319,7 +319,7 @@ async def assert_turso_schema() -> None:
             if type(error).__name__ != "PanicException":
                 raise
             raise DatabaseConfigurationError(
-                "Turso schema is not initialized or is unavailable. Run turso/00_init.sql and turso/02_billing.sql in the Turso SQL shell, "
+                "Turso schema is not initialized or is unavailable. Run turso/00_init.sql, turso/02_billing.sql, and turso/04_limits_and_github.sql in the Turso SQL shell, "
                 "then restart the backend."
             ) from error
         _turso_schema_verified = True
@@ -329,7 +329,7 @@ def explain_database_error(error: Exception) -> str:
     """Return safe, actionable messages without exposing database credentials or SQL."""
     message = str(error).lower()
     if "no such table" in message or "does not exist" in message:
-        return "Turso schema is not initialized. Run turso/00_init.sql, then restart the backend."
+        return "Turso schema is not initialized. Run turso/00_init.sql and the current additive migrations, then restart the backend."
     if "vector" in message and ("dimension" in message or "length" in message):
         return (
             "The configured embedding dimension does not match the Turso schema. "

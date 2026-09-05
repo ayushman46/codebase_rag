@@ -13,11 +13,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from agent.agent import run_agent_loop
+from agent.code_edit import create_edit_ticket, edit_file_paths
 from agent.nemotron import LLMProviderError
 from api.auth import get_current_user
-from config import ModelConfigurationError, query_request_limiter, settings
+from config import ModelConfigurationError, get_editing_ticket_secret, query_request_limiter, settings
 from database import DatabaseConfigurationError, assert_turso_schema, explain_database_error, get_turso_store
-from retrieval.retriever import build_evidence_plan, is_overview_file, retrieve_context
+from retrieval.retriever import build_evidence_plan, extract_requested_file_paths, is_overview_file, retrieve_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,13 +27,17 @@ _GREETING_PATTERN = re.compile(
     r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))(?:\s+(?:there|everyone|again))?[!. ]*$",
     re.IGNORECASE,
 )
+_EDIT_ACTION_PATTERN = re.compile(
+    r"\b(?:change|fix|update|replace|add|remove|delete|refactor|modify|implement|patch|make|set|rename)\b",
+    re.IGNORECASE,
+)
 
 
 class QueryRequest(BaseModel):
     repo_name: str = Field(min_length=1, max_length=200)
     question: str = Field(min_length=1, max_length=4_000)
-    model_profile: Literal["fast", "detailed"] = "fast"
-    workflow: Literal["general", "onboarding", "security", "architecture", "contributor", "due_diligence"] = "general"
+    model_profile: Literal["fast", "detailed", "code"] = "fast"
+    workflow: Literal["general", "onboarding", "security", "architecture", "contributor", "due_diligence", "editing"] = "general"
 
 
 def timestamp() -> str:
@@ -81,7 +86,19 @@ def build_context(chunks: list[dict]) -> str:
     return "\n\n".join(sections)
 
 
-def build_retrieval_fallback(chunks: list[dict]) -> str:
+def build_retrieval_fallback(chunks: list[dict], workflow: str = "general") -> str:
+    if workflow == "editing":
+        return (
+            "## Code editing is temporarily unavailable\n"
+            "The code model could not generate a safe, evidence-grounded patch right now. "
+            "No files were changed and no GitHub branch or pull request was created. "
+            "Retry with **Code editing and PR** selected; the review and push controls appear only after a validated patch is generated.\n\n"
+            "## Relevant files\n" + "\n".join(
+                f"- **{chunk['file_path']} (L{chunk['start_line']}-L{chunk['end_line']}):** "
+                + " ".join(str(chunk.get("content") or "").split())[:220]
+                for chunk in chunks[:5]
+            )
+        )
     lines = [
         "## Retrieved code context",
         "Live answer generation is temporarily unavailable. The relevant repository evidence is available below.",
@@ -136,12 +153,39 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         if not question:
             raise HTTPException(status_code=422, detail="Question must contain non-whitespace text.")
         workflow = getattr(req, "workflow", "general")
+        if req.model_profile == "code" and workflow != "editing":
+            raise HTTPException(status_code=422, detail="The code model is available only in Code editing and PR mode.")
+        effective_model_profile = "code" if workflow == "editing" else req.model_profile
         evidence_plan = build_evidence_plan(question, workflow)
+        edit_suggestion = None
+        edit_ticket = None
         if is_greeting(question):
             answer, tool_calls, mode, citations = build_greeting_response(req.repo_name), [], "greeting", []
+        elif (
+            workflow == "editing"
+            and not _EDIT_ACTION_PATTERN.search(question)
+            and not extract_requested_file_paths(question)
+        ):
+            # Do not send a conversational follow-up such as "does this fix
+            # the issue?" back through broad editing retrieval. It has no
+            # actionable target and would otherwise produce unrelated files
+            # with no safe patch. Ask for a concrete change instead.
+            answer = (
+                "## Code editing and PR\n\n"
+                "Describe one concrete change and include the target file path, for example: "
+                "`Change the dashboard background to white in src/index.css`. "
+                "I will generate an exact patch, let you review it, and then expose the GitHub PR action."
+            )
+            tool_calls, mode, citations = [], "editing_guidance", []
         else:
             chunks, conversation_history = await asyncio.gather(
-                retrieve_context(store, repo["id"], question, top_k=settings.retrieval_top_k, workflow=workflow),
+                retrieve_context(
+                    store,
+                    repo["id"],
+                    question,
+                    top_k=(settings.editing_retrieval_top_k if workflow == "editing" else settings.retrieval_top_k),
+                    workflow=workflow,
+                ),
                 get_conversation_history(store, repo["id"], current_user.id),
             )
             # Keep the API response aligned with the retrieval evidence
@@ -159,14 +203,20 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
                 if not context:
                     raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
                 try:
-                    answer, tool_calls = await run_agent_loop(
-                        store, repo["id"], question, context, conversation_history, req.model_profile,
+                    result = await run_agent_loop(
+                        store, repo["id"], question, context, conversation_history, effective_model_profile,
                         workflow=workflow, evidence_plan=evidence_plan,
+                        return_edit=(workflow == "editing"),
                     )
-                    mode = "rag"
+                    if isinstance(result, tuple) and len(result) == 3:
+                        answer, tool_calls, edit_suggestion = result
+                    else:
+                        answer, tool_calls = result
+                    mode = "editing" if workflow == "editing" else "rag"
                 except (LLMProviderError, ModelConfigurationError):
                     logger.warning("Live answer generation unavailable for repository %s; returning retrieved evidence", repo["id"])
-                    answer, tool_calls, mode = build_retrieval_fallback(chunks), [], "retrieval_fallback"
+                    answer, tool_calls, mode = build_retrieval_fallback(chunks, workflow), [], "retrieval_fallback"
+                    edit_suggestion = None
                 citations = [
                     {
                         "file_path": chunk["file_path"], "start_line": chunk["start_line"], "end_line": chunk["end_line"],
@@ -178,6 +228,31 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
                     }
                     for chunk in chunks
                 ]
+                if edit_suggestion:
+                    # A ticket is issued only for validated evidence-grounded
+                    # files. It scopes every file in an issue patch so the PR
+                    # endpoint cannot be repurposed for an unrelated path.
+                    # It is never persisted in chat history and expires even
+                    # if a user leaves the review window open.
+                    if evidence_plan.get("issue_reference"):
+                        edit_suggestion = {
+                            **edit_suggestion,
+                            "issue_reference": evidence_plan["issue_reference"],
+                        }
+                    target_paths = edit_file_paths(edit_suggestion)
+                    citation_paths = {str(citation["file_path"]) for citation in citations}
+                    if target_paths and set(target_paths).issubset(citation_paths):
+                        try:
+                            edit_ticket = create_edit_ticket(
+                                get_editing_ticket_secret(),
+                                user_id=current_user.id,
+                                repo_name=req.repo_name,
+                                file_path=target_paths,
+                                ttl_seconds=settings.editing_ticket_ttl_seconds,
+                            )
+                        except ValueError:
+                            logger.warning("Editing ticket secret is not configured; disabling PR action")
+                            edit_ticket = None
         latency_ms = int((time.time() - started) * 1000)
         await save_message(store, repo_id=repo["id"], user_id=current_user.id, role="user", content=question)
         await save_message(
@@ -186,8 +261,9 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         )
         return {
             "answer": answer, "mode": mode, "citations": citations, "tool_calls": tool_calls,
-            "latency_ms": latency_ms, "tokens_used": 0, "model_profile": req.model_profile,
+            "latency_ms": latency_ms, "tokens_used": 0, "model_profile": effective_model_profile,
             "workflow": workflow, "evidence_plan": evidence_plan,
+            "edit_suggestion": edit_suggestion, "edit_ticket": edit_ticket,
         }
     except HTTPException:
         raise

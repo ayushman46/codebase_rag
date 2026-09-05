@@ -68,10 +68,10 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(checks, {"turso": {"status": "ok"}, "nvidia": {"status": "ok"}})
         self.assertNotIn("test-secret", str(checks))
 
-    def test_default_ingestion_limits_are_50mb_repository_and_20mb_file(self):
+    def test_default_ingestion_limits_are_100mb_repository_and_50mb_file(self):
         from config import settings
-        self.assertEqual(settings.max_repository_bytes, 50_000_000)
-        self.assertEqual(settings.max_file_size_bytes, 20_000_000)
+        self.assertEqual(settings.max_repository_bytes, 100_000_000)
+        self.assertEqual(settings.max_file_size_bytes, 50_000_000)
 
     def test_turso_store_handles_parameterized_rows_and_json_metadata(self):
         from database import TursoStore
@@ -161,10 +161,13 @@ class BackendSmokeTests(unittest.TestCase):
         from pydantic import ValidationError
         self.assertEqual(get_answer_model_options("fast")[0], "nvidia/nemotron-3-super-120b-a12b")
         self.assertEqual(get_answer_model_options("detailed")[0], "nvidia/nemotron-3-ultra-550b-a55b")
+        self.assertEqual(get_answer_model_options("fast", "editing")[0], "nvidia/nemotron-3-super-120b-a12b")
+        self.assertEqual(get_answer_model_options("code")[0], "nvidia/nemotron-3-super-120b-a12b")
         with self.assertRaises(ValidationError):
             QueryRequest(repo_name="demo", question="Where is login?", model_profile="untrusted/model")
         with self.assertRaises(ValidationError):
             QueryRequest(repo_name="demo", question="Where is login?", workflow="untrusted")
+        self.assertEqual(QueryRequest(repo_name="demo", question="Fix src/auth.py", workflow="editing").workflow, "editing")
 
     def test_credentials_cors_rejects_a_wildcard_origin(self):
         from config import get_cors_origins
@@ -237,6 +240,28 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(embedded), len(chunks))
         self.assertTrue(all("embedding" in chunk for chunk in embedded))
 
+    def test_embed_chunks_uses_larger_bounded_batches_for_small_files(self):
+        from config import settings
+        chunks = [
+            {"file_path": f"src/{index}.py", "content": f"value = {index}", "start_line": 1,
+             "end_line": 1, "language": "py"}
+            for index in range(33)
+        ]
+        request_sizes = []
+
+        def fake_embed(texts, *, input_type):
+            self.assertEqual(input_type, "passage")
+            request_sizes.append(len(texts))
+            return [[float(index)] * EMBEDDING_DIMENSION for index in range(len(texts))]
+
+        with patch.object(settings, "embedding_batch_size", 16), \
+             patch.object(settings, "embedding_min_batch_size", 4), \
+             patch("ingest.embedder.embed_texts", side_effect=fake_embed):
+            embedded = embed_chunks(chunks)
+
+        self.assertEqual(request_sizes, [16, 16, 1])
+        self.assertEqual(len(embedded), len(chunks))
+
     def test_ensure_repo_record_queues_failed_repository_without_erasing_old_index(self):
         from ingest.pipeline import ensure_repo_record
         store = MemoryStore()
@@ -285,6 +310,13 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(plan["workflow"], "security")
         self.assertIn("middleware", plan["path_hints"])
         self.assertIn("auth", plan["search_terms"])
+
+    def test_issue_reference_keeps_editing_retrieval_broad_and_traceable(self):
+        from retrieval.retriever import build_evidence_plan, extract_issue_reference
+        plan = build_evidence_plan("Issue #1428: authentication fails after refresh", "editing")
+        self.assertEqual(extract_issue_reference("Please fix GitHub issue #1428"), "1428")
+        self.assertEqual(plan["issue_reference"], "1428")
+        self.assertEqual(plan["query_scope"], "issue")
 
     def test_navigation_question_excludes_readme_and_targets_header_files(self):
         from retrieval.retriever import build_evidence_plan, is_overview_file, retrieve_context
@@ -550,6 +582,19 @@ class BackendSmokeTests(unittest.TestCase):
             edges = build_dependency_manifest([str(entry), str(auth)], str(root))
         self.assertEqual(edges[0]["target_file"], "pkg/auth.py")
 
+    def test_combined_manifest_scan_hashes_and_resolves_in_one_result(self):
+        from ingest.dependencies import build_manifest_and_dependency_manifest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pkg").mkdir()
+            entry = root / "pkg" / "main.py"
+            auth = root / "pkg" / "auth.py"
+            entry.write_text("from .auth import login\n", encoding="utf-8")
+            auth.write_text("def login(): pass\n", encoding="utf-8")
+            manifest, edges = build_manifest_and_dependency_manifest([str(entry), str(auth)], str(root))
+        self.assertEqual(set(manifest), {"pkg/main.py", "pkg/auth.py"})
+        self.assertEqual(edges[0]["target_file"], "pkg/auth.py")
+
     def test_file_manifest_changes_only_when_content_changes(self):
         from ingest.pipeline import build_file_manifest
         with tempfile.TemporaryDirectory() as tmp:
@@ -626,6 +671,20 @@ class BackendSmokeTests(unittest.TestCase):
             result = asyncio.run(retrieve_context(store, "repo-1", "show sql/schema.sql", top_k=2))
         self.assertEqual([chunk["id"] for chunk in result], ["schema-1"])
         self.assertEqual(store.fetch_all.await_count, 1)
+
+    def test_editing_retrieval_keeps_all_bounded_chunks_for_a_named_file(self):
+        from retrieval.retriever import retrieve_context
+
+        store = MemoryStore()
+        chunks = [
+            {"id": f"chunk-{index}", "file_path": "src/auth.py", "start_line": index * 10 + 1,
+             "end_line": index * 10 + 9, "language": "py", "symbols": [], "content": f"line {index}"}
+            for index in range(12)
+        ]
+        store.fetch_all = AsyncMock(return_value=chunks)
+        result = asyncio.run(retrieve_context(store, "repo-1", "Fix src/auth.py", top_k=8, workflow="editing"))
+        self.assertEqual(len(result), len(chunks))
+        self.assertTrue(all(chunk["_retrieval_methods"] == ["requested_file"] for chunk in result))
 
     def test_requested_file_paths_escape_like_wildcards(self):
         from retrieval.retriever import requested_file_chunks
@@ -707,6 +766,36 @@ class BackendSmokeTests(unittest.TestCase):
             response = asyncio.run(query_repo(request, user))
         self.assertEqual(response["workflow"], "security")
         self.assertEqual(response["evidence_plan"]["workflow"], "security")
+
+    def test_editing_query_returns_a_scoped_ticket_and_code_profile(self):
+        from api.query_router import query_repo
+        from agent.code_edit import verify_edit_ticket
+        from config import settings
+
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-edit")
+        request = SimpleNamespace(repo_name="demo", question="Fix src/auth.py", model_profile="fast", workflow="editing")
+        chunks = [{
+            "id": "chunk-1", "file_path": "src/auth.py", "start_line": 1, "end_line": 3,
+            "language": "py", "symbols": [], "content": "def login():\n    return True",
+        }]
+        suggestion = {
+            "file_path": "src/auth.py", "summary": "Use the validated session helper",
+            "changes": [{"old": "def login():\n    return True", "new": "def login():\n    return validate_session()", "reason": ""}],
+            "validation": ["python -m compileall src/auth.py"],
+        }
+        with patch.object(settings, "editing_ticket_secret", "test-editing-secret"), \
+             patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.get_conversation_history", new=AsyncMock(return_value=[])), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Proposed change", [], suggestion))):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["model_profile"], "code")
+        self.assertEqual(response["workflow"], "editing")
+        self.assertIsNotNone(response["edit_ticket"])
+        verify_edit_ticket("test-editing-secret", response["edit_ticket"], user_id="user-edit", repo_name="demo", file_path="src/auth.py")
 
     def test_query_returns_guidance_without_matching_source(self):
         from api.query_router import query_repo

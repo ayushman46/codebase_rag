@@ -1,7 +1,6 @@
 """Durable Turso-backed repository ingestion pipeline."""
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -20,7 +19,7 @@ from ingest.cloner import (
     repository_name,
     RepositoryValidationError,
 )
-from ingest.dependencies import build_dependency_manifest
+from ingest.dependencies import build_manifest_and_dependency_manifest
 from ingest.embedder import EmbeddingUnavailableError, embed_chunks
 from ingest.summarizer import build_kt_cache
 from quota import ensure_repository_usage_capacity
@@ -165,7 +164,16 @@ async def update_repo(store, repo_id: str, **fields) -> None:
     await store.execute(f"UPDATE repos SET {assignments} WHERE id = ?", [*fields.values(), repo_id])
 
 
-async def embed_repository_chunks(store, repo_id: str, chunks: list[dict], job_id: str | None = None, claim_token: str | None = None):
+async def embed_repository_chunks(
+    store,
+    repo_id: str,
+    chunks: list[dict],
+    job_id: str | None = None,
+    claim_token: str | None = None,
+    *,
+    progress_offset: int = 0,
+    progress_total: int | None = None,
+):
     """Embed in cancellable batches and publish meaningful UI progress."""
     embedded_chunks: list[dict] = []
     batch_size = max(1, settings.embedding_batch_size)
@@ -175,16 +183,19 @@ async def embed_repository_chunks(store, repo_id: str, chunks: list[dict], job_i
     total_chunks = len(chunks)
 
     async def report_progress(completed: int):
-        percent = int((completed / total_chunks) * 100) if total_chunks else 100
+        overall_completed = progress_offset + completed
+        percent = int((overall_completed / progress_total) * 100) if progress_total else None
+        progress_label = f" ({min(100, percent)}%)." if percent is not None else "."
         await update_repo(
             store, repo_id,
             error_message=(
-                f"Indexing {completed} of {total_chunks} code sections ({percent}%). "
+                f"Indexing {overall_completed} code sections{progress_label} "
                 "Large repositories can take a few minutes while embeddings are created."
             ),
         )
 
-    await report_progress(0)
+    if progress_offset == 0:
+        await report_progress(0)
     offset = 0
     batch_number = 0
     while offset < len(chunks):
@@ -482,14 +493,11 @@ async def run_ingestion_for_repo(
         # CPU/file work together and overlap it with the metadata lookup so a
         # large repository does not pay three full serial passes before
         # chunking starts.
-        manifest_task = run_blocking(build_file_manifest, files, repo_path)
-        dependency_task = run_blocking(build_dependency_manifest, files, repo_path)
         previous_rows_task = store.fetch_all(
             "SELECT file_path, content_hash FROM repo_files WHERE repo_id = ?", [repo_id]
         )
-        manifest, dependencies, previous_rows = await asyncio.gather(
-            manifest_task, dependency_task, previous_rows_task,
-        )
+        manifest_task = run_blocking(build_manifest_and_dependency_manifest, files, repo_path)
+        (manifest, dependencies), previous_rows = await asyncio.gather(manifest_task, previous_rows_task)
         previous_manifest = {row["file_path"]: row["content_hash"] for row in previous_rows}
         changed_paths = {
             path for path, metadata in manifest.items()
@@ -498,37 +506,100 @@ async def run_ingestion_for_repo(
         removed_paths = set(previous_manifest) - set(manifest)
         await replace_changed_file_chunks(store, repo_id, changed_paths, removed_paths)
 
-        def collect_chunks():
-            changed_files = [
-                file_path for file_path in files
-                if os.path.relpath(file_path, repo_path).replace(os.sep, "/") in changed_paths
-            ]
-            chunks = []
+        changed_files = [
+            file_path for file_path in files
+            if os.path.relpath(file_path, repo_path).replace(os.sep, "/") in changed_paths
+        ]
+        # Chunk files incrementally, but aggregate a bounded number of chunks
+        # before calling the embedding provider. Small files otherwise create
+        # one under-filled request per file. The buffer is deliberately small
+        # enough to keep peak memory proportional to tens of chunks rather than
+        # the whole repository on the 512 MB Render instance.
+        chunked_paths: set[str] = set()
+        new_chunk_count = 0
+        existing_count = await get_repo_chunk_count(store, repo_id)
+        semantic_index_warning = None
+        await update_repo(store, repo_id, status="chunking")
 
-            def chunks_for_file(file_path: str) -> list[dict]:
-                return chunk_file(file_path, repo_path)
+        async def persist_embedded_chunks(embedded_chunks: list[dict]) -> None:
+            for offset in range(0, len(embedded_chunks), max(1, settings.chunk_insert_batch_size)):
+                await raise_if_ingestion_cancelled(store, repo_id, claim_token)
+                await heartbeat_job(store, job_id, claim_token)
+                records = [
+                    {
+                        "id": str(uuid4()), "repo_id": repo_id, "file_path": chunk["file_path"],
+                        "start_line": chunk["start_line"], "end_line": chunk["end_line"],
+                        "language": chunk["language"], "symbols": chunk.get("symbols", []),
+                        "content": chunk["content"], "embedding": chunk.get("embedding"),
+                    }
+                    for chunk in embedded_chunks[offset:offset + max(1, settings.chunk_insert_batch_size)]
+                ]
+                await store.insert_chunks(records)
+                del records
 
-            # Chunking is independent per file and largely I/O/regex work.
-            # A bounded pool overlaps those passes for repositories with many
-            # changed files without creating one task per file or changing
-            # output order. Small repositories stay on the cheaper serial path.
-            if len(changed_files) >= 8:
-                workers = min(4, max(2, (os.cpu_count() or 2) // 2))
-                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chunker") as executor:
-                    chunk_groups = executor.map(chunks_for_file, changed_files)
-                    for file_chunks in chunk_groups:
-                        chunks.extend(file_chunks)
-                        if len(chunks) > settings.max_repository_chunks:
-                            raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
+        chunk_buffer: list[dict] = []
+        embedded_count = 0
+        embeddings_disabled = False
+
+        async def flush_chunk_buffer() -> None:
+            nonlocal chunk_buffer, embedded_count, semantic_index_warning, embeddings_disabled
+            if not chunk_buffer:
+                return
+            batch = chunk_buffer
+            chunk_buffer = []
+            await update_repo(store, repo_id, status="embedding")
+            if embeddings_disabled:
+                embedded_chunks = [{**chunk, "embedding": None} for chunk in batch]
             else:
-                for file_path in changed_files:
-                    chunks.extend(chunks_for_file(file_path))
-                    if len(chunks) > settings.max_repository_chunks:
-                        raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
-            return chunks
+                try:
+                    embedded_chunks = await embed_repository_chunks(
+                        store,
+                        repo_id,
+                        batch,
+                        job_id,
+                        claim_token,
+                        progress_offset=embedded_count,
+                    )
+                except EmbeddingUnavailableError as error:
+                    # A provider outage is job-wide, not batch-local. Do not
+                    # spend another five retries for every subsequent buffer.
+                    embeddings_disabled = True
+                    logger.warning("NVIDIA embeddings unavailable for %s; using keyword retrieval: %s", repo_id, error)
+                    semantic_index_warning = (
+                        "NVIDIA semantic embeddings are temporarily unavailable. "
+                        "This repository is ready with keyword retrieval; re-index later to restore semantic search."
+                    )
+                    embedded_chunks = [{**chunk, "embedding": None} for chunk in batch]
+            await persist_embedded_chunks(embedded_chunks)
+            embedded_count += len(embedded_chunks)
+            del embedded_chunks
+            del batch
 
-        all_chunks = await run_blocking(collect_chunks)
-        chunked_paths = {chunk["file_path"] for chunk in all_chunks}
+        for file_index, file_path in enumerate(changed_files, start=1):
+            await raise_if_ingestion_cancelled(store, repo_id, claim_token)
+            file_chunks = await run_blocking(chunk_file, file_path, repo_path)
+            relative_path = os.path.relpath(file_path, repo_path).replace(os.sep, "/")
+            if not file_chunks:
+                continue
+            chunked_paths.add(relative_path)
+            new_chunk_count += len(file_chunks)
+            if existing_count + new_chunk_count > settings.max_repository_chunks:
+                raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
+            chunk_buffer.extend(file_chunks)
+            if len(chunk_buffer) >= max(1, settings.embedding_chunk_buffer_size):
+                await flush_chunk_buffer()
+            # Keep progress alive while a buffer is below the provider
+            # threshold and no embedding request has completed yet.
+            if file_index == len(changed_files) or file_index % max(1, settings.embedding_progress_interval_batches) == 0:
+                await update_repo(
+                    store,
+                    repo_id,
+                    error_message=f"Reading source files ({file_index} of {len(changed_files)} changed files).",
+                )
+            del file_chunks
+
+        await flush_chunk_buffer()
+
         chunking_failed_paths = sorted(changed_paths - chunked_paths)
         if chunking_failed_paths:
             reasons = dict(selection_report.get("excluded_reasons") or {})
@@ -538,42 +609,8 @@ async def run_ingestion_for_repo(
             selection_report["excluded_paths"] = sorted({
                 *selection_report.get("excluded_paths", []), *chunking_failed_paths,
             })
-        existing_count = await get_repo_chunk_count(store, repo_id)
-        if existing_count + len(all_chunks) > settings.max_repository_chunks:
-            raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
-        if not all_chunks and existing_count == 0:
+        if not chunked_paths and existing_count == 0:
             raise ValueError("No readable source code chunks were created from this repository.")
-
-        await raise_if_ingestion_cancelled(store, repo_id, claim_token)
-        await heartbeat_job(store, job_id, claim_token)
-        await update_repo(store, repo_id, status="embedding")
-        semantic_index_warning = None
-        embedded_chunks = []
-        if all_chunks:
-            try:
-                embedded_chunks = await embed_repository_chunks(store, repo_id, all_chunks, job_id, claim_token)
-            except EmbeddingUnavailableError as error:
-                logger.warning("NVIDIA embeddings unavailable for %s; using keyword retrieval: %s", repo_id, error)
-                semantic_index_warning = (
-                    "NVIDIA semantic embeddings are temporarily unavailable. "
-                    "This repository is ready with keyword retrieval; re-index later to restore semantic search."
-                )
-                embedded_chunks = [{**chunk, "embedding": None} for chunk in all_chunks]
-
-        insert_batch_size = max(1, settings.chunk_insert_batch_size)
-        for offset in range(0, len(embedded_chunks), insert_batch_size):
-            await raise_if_ingestion_cancelled(store, repo_id, claim_token)
-            await heartbeat_job(store, job_id, claim_token)
-            records = [
-                {
-                    "id": str(uuid4()), "repo_id": repo_id, "file_path": chunk["file_path"],
-                    "start_line": chunk["start_line"], "end_line": chunk["end_line"],
-                    "language": chunk["language"], "symbols": chunk.get("symbols", []),
-                    "content": chunk["content"], "embedding": chunk.get("embedding"),
-                }
-                for chunk in embedded_chunks[offset:offset + insert_batch_size]
-            ]
-            await store.insert_chunks(records)
 
         await persist_file_manifest(store, repo_id, manifest)
         await persist_dependency_manifest(store, repo_id, dependencies)
@@ -587,8 +624,8 @@ async def run_ingestion_for_repo(
         await heartbeat_job(store, job_id, claim_token)
         await update_repo(store, repo_id, status="summarizing")
         indexed_chunks = await store.fetch_all(
-            "SELECT file_path, start_line, end_line, language, symbols, content FROM chunks "
-            "WHERE repo_id = ? ORDER BY file_path, start_line", [repo_id]
+            "SELECT file_path, start_line, end_line, language, symbols FROM chunks "
+            "WHERE repo_id = ? ORDER BY file_path, start_line LIMIT ?", [repo_id, settings.max_repository_chunks]
         )
         await build_kt_cache(store, repo_id, indexed_chunks)
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)

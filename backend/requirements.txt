@@ -6,3 +6,5 @@ libsql==0.1.11
 GitPython
 pydantic-settings
 razorpay
+httpx
+cryptography

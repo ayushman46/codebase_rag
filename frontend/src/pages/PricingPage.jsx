@@ -10,14 +10,14 @@ const plans = [
     availability: 'Available now',
     price: 'Free',
     detail: 'Everything you need to evaluate a repository and learn the workflow.',
-    features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations', 'Up to 500 MB of total indexed repositories'],
+    features: ['Google account workspace', 'Public repository ingestion', 'Grounded answers with citations', 'Up to 200 MB of total indexed repositories'],
   },
   {
     name: 'Team',
     availability: 'Available now',
     price: '₹300 / month',
     detail: 'More room for multiple repositories and a higher cumulative indexing limit for your workspace.',
-    features: ['Everything in Explorer', 'Up to 5 GB across your workspace', 'Higher indexing capacity', 'Priority support'],
+    features: ['Everything in Explorer', 'Up to 800 MB across your workspace', 'Higher indexing capacity', 'Priority support'],
   },
 ];
 

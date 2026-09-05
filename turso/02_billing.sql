@@ -6,7 +6,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS account_entitlements (
   user_id TEXT PRIMARY KEY,
   plan TEXT NOT NULL DEFAULT 'explorer' CHECK (plan IN ('explorer', 'team')),
-  quota_bytes INTEGER NOT NULL DEFAULT 500000000 CHECK (quota_bytes > 0),
+  quota_bytes INTEGER NOT NULL DEFAULT 200000000 CHECK (quota_bytes > 0),
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'past_due', 'cancelled')),
   razorpay_order_id TEXT,
   razorpay_payment_id TEXT,

@@ -60,7 +60,10 @@ async def get_account_usage(store, user_id: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             team_active = False
     if team_active:
-        quota_bytes = _as_int((entitlement or {}).get("quota_bytes"), settings.team_codebase_bytes)
+        quota_bytes = min(
+            _as_int((entitlement or {}).get("quota_bytes"), settings.team_codebase_bytes),
+            settings.team_codebase_bytes,
+        )
     else:
         if plan == "team" and status == "active":
             status = "expired"
