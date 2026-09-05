@@ -60,18 +60,20 @@ const ChatWindow = ({ onClose }) => {
           Code editing and PR mode generates an exact patch first. The GitHub review and push action appears after the patch passes validation.
         </p>
       )}
-      <form onSubmit={handleSubmit} className="relative flex w-full items-center rounded-full border border-sand bg-pure-white p-2 shadow-lg shadow-charcoal/5">
-      <input
-        type="text"
-        aria-label="Ask a question about the selected codebase"
-        autoComplete="off"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        placeholder={workflow === 'editing' ? 'Describe a focused fix for path/to/file' : 'Ask about this codebase'}
-        className="h-14 w-full bg-transparent pl-5 pr-48 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-6 sm:pr-56"
-        disabled={isQuerying || isHistoryLoading}
-      />
-      <div className="absolute right-[4.5rem] flex items-center gap-1 text-warm-gray sm:right-[5rem]">
+      <form onSubmit={handleSubmit} className="flex w-full flex-wrap items-center gap-1 rounded-3xl border border-sand bg-pure-white p-2 shadow-lg shadow-charcoal/5 sm:flex-nowrap sm:gap-2 sm:rounded-full">
+      <div className="min-w-0 basis-full flex-1 sm:basis-auto">
+        <input
+          type="text"
+          aria-label="Ask a question about the selected codebase"
+          autoComplete="off"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={workflow === 'editing' ? 'Describe a focused fix for path/to/file' : 'Ask about this codebase'}
+          className="h-14 min-w-0 w-full truncate bg-transparent px-3 text-base text-ink-black outline-none placeholder:text-warm-gray sm:pl-5"
+          disabled={isQuerying || isHistoryLoading}
+        />
+      </div>
+      <div className="flex min-w-0 max-w-full shrink-0 items-center gap-1 text-warm-gray">
         <div className="relative flex items-center">
           <label className="sr-only" htmlFor="model-profile-select">Answer model</label>
           <select
@@ -79,7 +81,7 @@ const ChatWindow = ({ onClose }) => {
             value={modelProfile}
             onChange={(event) => setModelProfile(event.target.value)}
             disabled={isQuerying || isHistoryLoading}
-            className="h-10 max-w-[10.75rem] appearance-none bg-transparent px-2 pr-6 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
+            className="h-10 min-w-0 max-w-[10.75rem] appearance-none bg-transparent px-2 pr-6 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
           >
             {workflow === 'editing' ? (
               <option value="code">Nemotron Super · Code editing</option>
@@ -99,7 +101,7 @@ const ChatWindow = ({ onClose }) => {
             value={workflow}
             onChange={(event) => setWorkflow(event.target.value)}
             disabled={isQuerying || isHistoryLoading}
-            className="h-10 max-w-[9rem] appearance-none bg-transparent px-2 pr-5 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
+            className="h-10 min-w-0 max-w-[9rem] appearance-none bg-transparent px-2 pr-5 text-xs font-medium text-pewter outline-none transition-colors hover:text-ink-black disabled:opacity-50 sm:max-w-none sm:text-sm"
           >
             <option value="general">Repository question</option>
             <option value="onboarding">New engineer onboarding</option>
@@ -115,7 +117,7 @@ const ChatWindow = ({ onClose }) => {
       <button
         type="submit"
         disabled={isQuerying || isHistoryLoading || !input.trim()}
-        className="absolute right-2 flex h-14 w-14 items-center justify-center rounded-full bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
+        className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-ember-orange text-pure-white transition-colors hover:bg-burnt-rust disabled:opacity-50"
         aria-label="Send question"
       >
         <Send className="h-5 w-5" aria-hidden="true" />
