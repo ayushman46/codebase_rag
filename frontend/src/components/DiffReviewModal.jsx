@@ -220,7 +220,18 @@ const DiffReviewModal = ({
       setFileSize(sizes[first] || 0);
       setSuggestionApplied(Boolean(applied[first]));
     } catch (err) {
-      setSubmitError(err.response?.data?.detail || 'Could not load the current GitHub file for review.');
+      // ``/github/status`` only tells us that a credential row exists. The
+      // first file request is the real token check, so an expired, revoked,
+      // or undecryptable token must immediately move the UI back to the
+      // disconnected state. Otherwise the modal stays stuck on "Connected"
+      // and gives the user no way to start OAuth again.
+      if (err.response?.status === 401) {
+        setGithubConnected(false);
+        setGithubUsername('');
+        setSubmitError('GitHub connection expired. Click Connect with GitHub to reconnect.');
+      } else {
+        setSubmitError(err.response?.data?.detail || 'Could not load the current GitHub file for review.');
+      }
     } finally {
       setIsLoadingFile(false);
     }
