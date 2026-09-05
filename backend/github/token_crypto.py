@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+
 from cryptography.fernet import Fernet, InvalidToken
 
 
 class TokenCryptoError(RuntimeError):
     """Raised when token encryption is not configured or data is invalid."""
+
+
+_DERIVATION_CONTEXT = b"codebase-intel/github-token/v1:"
 
 
 def _fernet(key: str) -> Fernet:
@@ -15,8 +21,20 @@ def _fernet(key: str) -> Fernet:
         raise TokenCryptoError("GitHub token encryption is not configured on the server.")
     try:
         return Fernet(value.encode("ascii"))
-    except Exception as error:
-        raise TokenCryptoError("GitHub token encryption key is invalid.") from error
+    except Exception:
+        # Render secrets are often entered as ordinary random text rather
+        # than as a 44-character Fernet key. Derive a deterministic Fernet
+        # key for strong, stable secrets while preserving direct support for
+        # existing Fernet keys. The secret must remain unchanged across
+        # deploys or previously encrypted tokens cannot be decrypted.
+        if len(value) < 32:
+            raise TokenCryptoError(
+                "GitHub token encryption key must be a valid Fernet key or a stable secret of at least 32 characters."
+            )
+        derived = base64.urlsafe_b64encode(
+            hashlib.sha256(_DERIVATION_CONTEXT + value.encode("utf-8")).digest()
+        )
+        return Fernet(derived)
 
 
 def encrypt_token(token: str, key: str) -> str:

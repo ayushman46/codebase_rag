@@ -31,6 +31,16 @@ class GitHubIntegrationTests(unittest.TestCase):
         with self.assertRaises(Exception):
             decrypt_token("ghp_example", key)
 
+    def test_tokens_accept_a_stable_render_secret(self):
+        from github.token_crypto import decrypt_token, encrypt_token
+
+        secret = "render-production-github-token-secret-2026"
+        encrypted = encrypt_token("ghp_render_example", secret)
+        self.assertTrue(encrypted.startswith("v1:"))
+        self.assertEqual(decrypt_token(encrypted, secret), "ghp_render_example")
+        with self.assertRaises(Exception):
+            decrypt_token(encrypted, secret + "-changed")
+
     def test_branch_and_file_validation_blocks_traversal_and_overwrite_names(self):
         from github.github_client import GitHubAPIError, validate_branch_name, validate_file_path
 
