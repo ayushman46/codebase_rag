@@ -60,6 +60,7 @@ const DiffReviewModal = ({
   const [appliedByPath, setAppliedByPath] = useState({});
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const popupRef = useRef(null);
+  const popupResultRef = useRef(false);
   const popupTimerRef = useRef(null);
   const popupTimeoutRef = useRef(null);
   const modalRef = useRef(null);
@@ -149,8 +150,15 @@ const DiffReviewModal = ({
   // Listen for popup auth success
   useEffect(() => {
     const handleMessage = (event) => {
-      if (event.source !== popupRef.current || event.data?.type !== 'GITHUB_AUTH_SUCCESS') return;
-      if (event.source === popupRef.current && event.data?.type === 'GITHUB_AUTH_SUCCESS') {
+      if (event.source !== popupRef.current) return;
+      if (event.data?.type === 'GITHUB_AUTH_ERROR') {
+        popupResultRef.current = true;
+        setIsConnecting(false);
+        setSubmitError(event.data.error || 'GitHub authorization failed. Check the GitHub OAuth and Render settings.');
+        return;
+      }
+      if (event.data?.type === 'GITHUB_AUTH_SUCCESS') {
+        popupResultRef.current = true;
         setGithubConnected(true);
         setGithubUsername(event.data.username || 'connected');
         setIsConnecting(false);
@@ -275,6 +283,7 @@ const DiffReviewModal = ({
       );
       if (!popup) throw new Error('Allow the GitHub popup to connect your account.');
       popupRef.current = popup;
+      popupResultRef.current = false;
 
       // Check if popup closed manually
       if (popupTimerRef.current) clearInterval(popupTimerRef.current);
@@ -286,7 +295,10 @@ const DiffReviewModal = ({
           popupTimeoutRef.current = null;
           popupTimerRef.current = null;
           setIsConnecting(false);
-          checkAuthRef.current?.();
+          // The callback already reported success or failure through
+          // postMessage. Do not immediately re-check the stale token row and
+          // overwrite a useful OAuth error with the generic 401 message.
+          if (!popupResultRef.current) checkAuthRef.current?.();
         }
       }, 1000);
       popupTimerRef.current = timer;

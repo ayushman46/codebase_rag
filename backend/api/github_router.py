@@ -294,9 +294,20 @@ async def github_callback(request: Request = None, code: str = "", state: str = 
         await store.execute("INSERT INTO user_github_tokens (user_id, github_user_id, github_username, access_token, scope, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET github_user_id = excluded.github_user_id, github_username = excluded.github_username, access_token = excluded.access_token, scope = excluded.scope, updated_at = excluded.updated_at", [state_row["user_id"], str(profile.get("id") or ""), username, encrypted, str(token_data.get("scope") or "public_repo"), _timestamp()])
         redirect = _safe_redirect(str(state_row.get("redirect_to") or "/dashboard"))
         return _callback_html("GitHub connected", "You can close this window and continue your review.")
-    except (GitHubAPIError, TokenCryptoError) as error:
+    except TokenCryptoError:
+        logger.error("GitHub OAuth token encryption is not configured correctly")
+        return _callback_html(
+            "GitHub server configuration error",
+            "The Render service could not securely store the GitHub token. Set a stable GITHUB_TOKEN_ENCRYPTION_KEY and redeploy.",
+            error="GitHub token encryption is not configured correctly on the server. Set GITHUB_TOKEN_ENCRYPTION_KEY in Render and redeploy.",
+        )
+    except GitHubAPIError as error:
         logger.warning("GitHub connection failed: %s", type(error).__name__)
-        return _callback_html("GitHub connection failed", "Reconnect GitHub and try again.", error="GitHub connection could not be completed.")
+        return _callback_html(
+            "GitHub connection failed",
+            "GitHub rejected the authorization. Check the OAuth client secret and callback URL in Render.",
+            error="GitHub authorization was rejected. Check GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_REDIRECT_URI.",
+        )
     except Exception as error:
         logger.exception("GitHub callback error")
         return _callback_html("GitHub connection failed", "Reconnect GitHub and try again.", error="GitHub connection could not be completed.")
