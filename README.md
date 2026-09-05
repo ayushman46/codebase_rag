@@ -2,6 +2,8 @@
 
 Codebase Intelligence turns a public GitHub repository into a private workspace that can be searched and discussed with source citations. It helps a person understand an unfamiliar system without opening every file manually. Answers are grounded in the indexed source, and each citation shows the file path, the line range, and the reason that the evidence was selected.
 
+The current interface uses one responsive chat composer. Users can choose an answer model and a workflow independently, while the question field, selectors, and send action remain separated at desktop, tablet, and mobile widths. Long questions stay clipped inside the input instead of covering the model or workflow controls.
+
 ## Why this project exists
 
 Modern repositories are difficult to learn because useful context is spread across application code, configuration, database scripts, tests, deployment files, and documentation. A README can describe the intended design while the implementation has changed. A normal chat model can also miss files, invent relationships, or cite a convenient document that does not answer the question.
@@ -84,7 +86,7 @@ Every selected file receives a SHA 256 content hash and a byte size. During re i
 
 The chunker reads a source file and preserves its relative path, language, symbols, starting line, ending line, and content. It uses declaration boundaries where possible and bounded line or character windows for large files. Chunk overlap helps preserve context across a boundary.
 
-The current safety settings allow a maximum of 150 lines per line based chunk window, a character ceiling of 12,000 characters per chunk, and a maximum of 3,500 chunks per repository. The worker streams one changed file at a time and releases vectors after each bounded insert batch, keeping peak memory suitable for a 512 MB Render instance.
+The current safety settings allow a maximum of 150 lines per line based chunk window, a character ceiling of 12,000 characters per chunk, and a maximum of 3,500 chunks per repository. The worker streams one changed file at a time and releases vectors after each bounded insert batch, keeping peak memory suitable for a 512 MB Render instance. The default repository limit is 100 MB and the default per file limit is 50 MB.
 
 ### Dependency evidence
 
@@ -92,7 +94,7 @@ The dependency pass recognizes common import and include forms and resolves them
 
 ### Embeddings
 
-The default embedding model is NVIDIA Nemotron 3 Embed 1B. It produces native 2,048 dimensional float vectors for the configured database schema. The worker sends passage inputs in bounded batches. It starts with eight passages per request and reduces the batch to four if the provider rejects a payload. Every chunk must still receive a vector or be retained for keyword retrieval when the provider is unavailable.
+The default embedding model is NVIDIA Nemotron 3 Embed 1B. It produces native 2,048 dimensional float vectors for the configured database schema. The worker sends passage inputs in bounded batches. It starts with sixteen passages per request and reduces the batch to four if the provider rejects a payload. Every chunk must still receive a vector or be retained for keyword retrieval when the provider is unavailable.
 
 The application keeps a small request budget for interactive questions while indexing. The default application limit is 20 NVIDIA calls per minute, with four calls reserved for queries. This is an application throttle and not a promise about NVIDIA hosted service quotas.
 
@@ -162,15 +164,41 @@ The chat selector provides bounded modes for different goals.
 
 6. Technical due diligence gives a bounded summary of architecture, dependencies, operational concerns, and evidence gaps.
 
-7. Code editing and PR is the only mode that can generate a change proposal or expose the GitHub review action. It asks the code-specialized model for exact search and replace hunks across at most eight explicitly evidenced files, checks every hunk against that file's indexed source, and refuses speculative or partial patches. The complete current files are loaded from GitHub before the proposed hunks are applied. A short lived, file set scoped server ticket is required before the file or PR endpoints can be used.
+7. Code editing and PR is the only mode that can generate a change proposal or expose the GitHub review action. It uses NVIDIA Nemotron Super for code generation, with the configured Nemotron Lightning fallback. It asks for exact search and replace hunks across at most eight explicitly evidenced files, checks every hunk against that file's indexed source, and refuses speculative or partial patches. The complete current files are loaded from GitHub before the proposed hunks are applied. A short lived, file set scoped server ticket is required before the file or PR endpoints can be used.
 
 The modes change evidence priorities and answer structure. They do not create facts that are absent from the repository.
 
+The model selector shows Super 120B Fast and Ultra 550B Detailed for ordinary repository questions. Selecting Code editing and PR switches the model to Nemotron Super and enables the patch and GitHub review path. The code workflow is intentionally unavailable in the other modes so a normal explanation cannot accidentally create a branch or pull request.
+
 ### Reviewed GitHub changes
 
-The Review and Push PR action is available only inside Code editing and PR mode and requires a separate GitHub OAuth connection. Google sign in remains the identity used for the Codebase Intel workspace. When a user opens a review, the server loads the exact current files and their Git blob SHAs, applies only validated exact-match hunks, and lets the user review or edit every complete file before confirming. The server checks that the signed in workspace owns the indexed repository, verifies the GitHub token and file-set editing ticket, validates relative paths and the branch name, checks every file SHA again, creates one atomic commit on a new codebase-intel branch, and opens a pull request. A user with write permission gets a branch in the upstream repository. A user without write permission gets a fork and a pull request targeting the upstream repository. Existing branches are never force updated, and any stale file returns a conflict so the user can refresh and review again.
+The Review and Push PR action is available only inside Code editing and PR mode and requires a separate GitHub OAuth connection. Google sign in remains the identity used for the Codebase Intel workspace. The complete workflow is:
 
-GitHub OAuth states are opaque, short lived, single use records in Turso. OAuth tokens are encrypted at rest with GITHUB_TOKEN_ENCRYPTION_KEY and are never sent to the browser or written to logs. Editing tickets use EDITING_TICKET_SECRET when set, or the existing GitHub encryption key during a rolling deployment. Set the exact callback URL in the GitHub OAuth App and in GITHUB_REDIRECT_URI. Run turso/04_limits_and_github.sql after the existing schema migrations before enabling the feature.
+1. The user selects Code editing and PR and asks for a focused change or pastes an issue reference and issue text.
+
+2. The retrieval planner selects the implementation files, tests, callers, and configuration needed for that change. A patch is generated only from exact indexed source hunks.
+
+3. The server validates the patch against the indexed file set and issues a short lived editing ticket scoped to the user, repository, and files.
+
+4. The user opens the review. The server loads the complete current files from GitHub and their Git blob SHAs. The review modal shows every proposed file in a separate tab, never treats a citation excerpt as a complete file, and lets the user inspect or edit each replacement.
+
+5. The user connects GitHub through the OAuth popup. The callback stores the token only after GitHub returns the authenticated profile. If OAuth fails, the popup error is passed back to the modal instead of being replaced by a generic expired connection message.
+
+6. After confirmation, the server checks repository ownership, the editing ticket, relative paths, branch naming, file size, and every expected file SHA. It creates one atomic commit on a new `codebase-intel/` branch and opens a pull request.
+
+A user with write permission gets a branch in the upstream repository. A user without write permission gets a fork and a pull request targeting the upstream repository. Existing branches are never force updated, and any stale file returns a conflict so the user can refresh and review again.
+
+GitHub OAuth states are opaque, short lived, single use records in Turso. OAuth tokens are encrypted at rest with `GITHUB_TOKEN_ENCRYPTION_KEY` and are never sent to the browser or written to logs. The key may be a valid Fernet key or a stable secret of at least 32 characters. It must not change between Render deploys. Editing tickets use `EDITING_TICKET_SECRET` when set, or the existing GitHub encryption key during a rolling deployment. Set the exact callback URL in the GitHub OAuth App and in `GITHUB_REDIRECT_URI`. Run `turso/04_limits_and_github.sql` after the existing schema migrations before enabling the feature.
+
+For the current Render service, the callback URL is:
+
+```text
+https://codebase-rag-qu7s.onrender.com/api/github/callback
+```
+
+For local development, use `http://localhost:8000/api/github/callback` and register it in a separate GitHub OAuth App or temporarily replace the production callback. GitHub OAuth Apps support one callback URL, so the callback configured in GitHub must match the environment currently being tested.
+
+If the review modal says that the GitHub connection expired, check the OAuth popup message first. A token encryption message means `GITHUB_TOKEN_ENCRYPTION_KEY` is missing, shorter than 32 characters, malformed, or different from the key used by the deployment that stored the token. A GitHub authorization message means `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, or `GITHUB_REDIRECT_URI` does not match the GitHub OAuth App. After correcting Render variables, redeploy, hard refresh the browser, and connect GitHub again. The connection is separate from Google sign in, so signing out of Google does not refresh the GitHub token.
 
 For an issue-driven change, select Code editing and PR mode and paste the issue number and full issue text, for example `Issue #1428: ...`. The retrieval plan records the issue reference, keeps a bounded hybrid search across implementation files, tests, callers, and configuration, and carries the issue number into the proposed pull request. The patch still appears only when every exact replacement is grounded in the selected repository evidence; if the available evidence cannot support a complete fix, the system refuses to expose a push action.
 
@@ -186,7 +214,7 @@ The backend dependencies are installed from backend/requirements.txt.
 
 3. OpenAI provides the client for the OpenAI compatible NVIDIA NIM endpoints.
 
-4. Code editing mode uses NVIDIA's hosted Qwen2.5 Coder model with a Qwen3 Next catalog fallback when the primary free endpoint is unavailable. Both models use the same provider-neutral client boundary.
+4. Code editing mode uses NVIDIA's hosted Nemotron Super model with a Nemotron Lightning catalog fallback when the primary endpoint is unavailable. Both models use the same provider-neutral client boundary.
 
 5. Supabase provides Google session validation.
 
@@ -357,6 +385,7 @@ GITHUB_FRONTEND_ORIGIN=http://localhost:5173
 # https://your-service.onrender.com/api/github/callback
 # and GITHUB_FRONTEND_ORIGIN to the frontend origin. RENDER_EXTERNAL_URL is
 # used as a safe fallback when the explicit callback is omitted.
+# Use a stable Fernet key or a stable random secret of at least 32 characters.
 GITHUB_TOKEN_ENCRYPTION_KEY=
 EDITING_TICKET_SECRET=
 EDITING_TICKET_TTL_SECONDS=600
@@ -453,11 +482,25 @@ All routes require a valid Supabase bearer token except the health and readiness
 
 16. POST /api/verify-payment verifies payment and activates the entitlement.
 
+17. GET /api/github/status reports whether the signed in user has a usable GitHub connection.
+
+18. GET /api/github/login starts the short lived GitHub OAuth flow.
+
+19. GET /api/github/callback completes GitHub OAuth and stores the encrypted token.
+
+20. GET /api/github/file loads the current complete file revision for a validated editing ticket.
+
+21. POST /api/github/disconnect removes the user's stored GitHub connection.
+
+22. POST /api/github/push-pr validates the reviewed files, creates the branch and atomic commit, and opens the pull request.
+
 ## Render deployment
 
 The Render blueprint builds the Vite frontend and serves it from the FastAPI application. It runs the local ingestion worker in the same web service and uses Turso as the durable database.
 
 Set the secret values in the Render environment for NVIDIA, Supabase, Turso, Razorpay, and the browser safe Supabase and Razorpay keys. Set CORS_ORIGINS to the final deployed origin. Do not put a private secret in a VITE variable.
+
+Set `GITHUB_REDIRECT_URI` to the exact Render callback URL and register the same value in the GitHub OAuth App. Set `GITHUB_FRONTEND_ORIGIN` and `CORS_ORIGINS` to the deployed application origin. `GITHUB_TOKEN_ENCRYPTION_KEY` must be a stable valid Fernet key or a stable secret of at least 32 characters. Changing it makes previously stored GitHub tokens unreadable and requires the user to reconnect GitHub. The committed `render.env.example` file contains the full production variable list without real credentials.
 
 After deployment, verify the following flow.
 
@@ -478,6 +521,8 @@ After deployment, verify the following flow.
 8. Test Team checkout only with Razorpay test credentials.
 
 9. Open the repository three dot menu, choose Change impact, and enter a relative source path to verify the dependency graph.
+
+10. Select Code editing and PR, generate a focused patch, review every file tab, connect GitHub, and confirm that one branch and one pull request are created.
 
 ## Reliability and security notes
 
