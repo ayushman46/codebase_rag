@@ -96,7 +96,7 @@ The dependency pass recognizes common import and include forms and resolves them
 
 The default embedding model is NVIDIA Nemotron 3 Embed 1B. It produces native 2,048 dimensional float vectors for the configured database schema. The worker sends passage inputs in bounded batches. It starts with up to 32 passages and 120,000 characters per request and reduces the batch to four if the provider rejects a payload. Every chunk must still receive a vector or be retained for keyword retrieval when the provider is unavailable.
 
-The application keeps a small request budget for interactive questions while indexing. The default application limit is 20 NVIDIA calls per minute, with four calls reserved for queries. This is an application throttle and not a promise about NVIDIA hosted service quotas.
+The application keeps a request budget for interactive questions while indexing. The default application ceiling is 40 embedding calls per minute, with eight calls reserved for query embeddings. Set `NVIDIA_CALLS_PER_MINUTE` to the exact value shown for your NVIDIA API key; this setting throttles our worker and cannot increase NVIDIA's account quota. NVIDIA may assign a different limit per model and under concurrent load.
 
 Progress writes are throttled so Turso is not updated after every provider request. Cancellation is still checked before every embedding batch and worker leases continue to receive heartbeats.
 
@@ -359,7 +359,8 @@ EMBEDDING_BATCH_SIZE=32
 EMBEDDING_MIN_BATCH_SIZE=4
 EMBEDDING_BATCH_MAX_CHARACTERS=120000
 EMBEDDING_CHUNK_BUFFER_SIZE=128
-NVIDIA_CALLS_PER_MINUTE=20
+NVIDIA_CALLS_PER_MINUTE=40
+QUERY_EMBEDDING_RESERVE_PER_MINUTE=8
 EMBEDDING_RETRY_ATTEMPTS=5
 EMBEDDING_RETRY_BASE_SECONDS=2
 EMBEDDING_PROGRESS_INTERVAL_BATCHES=4

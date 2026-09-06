@@ -730,6 +730,48 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertTrue(response["citations"][0]["retrieval_reasons"])
         self.assertEqual(sum("INSERT INTO chat_messages" in sql for sql, _ in store.executed), 2)
 
+    def test_query_returns_source_answer_when_history_write_is_temporarily_unavailable(self):
+        from api.query_router import query_repo
+
+        store = MemoryStore()
+        original_execute = store.execute
+
+        async def flaky_execute(sql, args=None):
+            if "chat_messages" in sql:
+                raise RuntimeError("Hrana stream not found")
+            return await original_execute(sql, args)
+
+        store.execute = flaky_execute
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="Where is login?", model_profile="fast")
+        chunks = [{"id": "chunk-1", "file_path": "src/auth.py", "start_line": 1, "end_line": 5, "language": "py", "symbols": ["login"], "content": "def login(): pass"}]
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.get_conversation_history", new=AsyncMock(return_value=[])), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Direct answer\nLogin is in auth.py.", []))):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["mode"], "rag")
+        self.assertIn("Login", response["answer"])
+
+    def test_query_continues_when_optional_history_read_fails(self):
+        from api.query_router import query_repo
+
+        store = MemoryStore()
+        user = SimpleNamespace(id="user-1")
+        request = SimpleNamespace(repo_name="demo", question="Where is login?", model_profile="fast")
+        chunks = [{"id": "chunk-1", "file_path": "src/auth.py", "start_line": 1, "end_line": 5, "language": "py", "symbols": ["login"], "content": "def login(): pass"}]
+        with patch("api.query_router.assert_turso_schema", new=AsyncMock()), \
+             patch("api.query_router.get_turso_store", return_value=store), \
+             patch("api.query_router.get_owned_repo", new=AsyncMock(return_value={"id": "repo-1", "status": "ready"})), \
+             patch("api.query_router.retrieve_context", new=AsyncMock(return_value=chunks)), \
+             patch("api.query_router.get_conversation_history", new=AsyncMock(side_effect=RuntimeError("Hrana stream not found"))), \
+             patch("api.query_router.run_agent_loop", new=AsyncMock(return_value=("## Direct answer\nLogin is in auth.py.", []))):
+            response = asyncio.run(query_repo(request, user))
+        self.assertEqual(response["mode"], "rag")
+        self.assertIn("Login", response["answer"])
+
     def test_query_endpoint_drops_overview_citations_at_api_boundary(self):
         from api.query_router import query_repo
 

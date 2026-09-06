@@ -112,8 +112,26 @@ class TursoStore:
         write can create a duplicate side effect. Idempotent write paths use a
         caller-supplied primary key or an upsert instead.
         """
+        return await self._execute_with_retry(sql, args, retry_idempotent_write=False)
+
+    async def execute_idempotent(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None):
+        """Execute an explicitly idempotent write with bounded reconnects.
+
+        Callers must use a stable primary key plus ``INSERT OR IGNORE`` or an
+        equivalent upsert. This is separate from ``execute`` so an ambiguous
+        payment, delete, or state transition is never retried accidentally.
+        """
+        return await self._execute_with_retry(sql, args, retry_idempotent_write=True)
+
+    async def _execute_with_retry(
+        self,
+        sql: str,
+        args: list[Any] | tuple[Any, ...] | None = None,
+        *,
+        retry_idempotent_write: bool,
+    ):
         arguments = list(args or [])
-        attempts = 3 if self._is_read_statement(sql) else 1
+        attempts = 3 if self._is_read_statement(sql) or retry_idempotent_write else 1
         for attempt in range(attempts):
             try:
                 async with self._lock:
@@ -134,7 +152,9 @@ class TursoStore:
                     ) from reconnect_error
                 if attempt == attempts - 1:
                     raise DatabaseUnavailableError(
-                        "Turso connection was lost while processing the request. Please retry shortly."
+                        "Turso connection was lost while writing. Please retry shortly."
+                        if retry_idempotent_write
+                        else "Turso connection was lost while processing the request. Please retry shortly."
                     ) from error
                 await asyncio.sleep(self._retry_delay(attempt))
 
@@ -159,6 +179,7 @@ class TursoStore:
             "database is locked", "database is busy", "busy", "timeout", "timed out",
             "connection", "temporarily unavailable", "http 429", "http 500", "http 502",
             "http 503", "http 504", "stream not found", "broken pipe", "connection reset",
+            "hrana", "transport", "socket", "unexpected eof", "eof while",
         ))
 
     @staticmethod
@@ -328,6 +349,10 @@ async def assert_turso_schema() -> None:
 def explain_database_error(error: Exception) -> str:
     """Return safe, actionable messages without exposing database credentials or SQL."""
     message = str(error).lower()
+    if isinstance(error, DatabaseUnavailableError) or any(marker in message for marker in (
+        "hrana", "stream not found", "broken pipe", "connection reset", "temporarily unavailable",
+    )):
+        return "The Turso database connection is temporarily unavailable. Please retry in a moment."
     if "no such table" in message or "does not exist" in message:
         return "Turso schema is not initialized. Run turso/00_init.sql and the current additive migrations, then restart the backend."
     if "vector" in message and ("dimension" in message or "length" in message):

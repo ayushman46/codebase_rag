@@ -131,9 +131,10 @@ def build_greeting_response(repo_name: str) -> str:
 async def save_message(store, *, repo_id: str, user_id: str, role: str, content: str,
                        citations: list | None = None, tool_calls: list | None = None,
                        mode: str | None = None, latency_ms: int | None = None) -> None:
-    await store.execute(
+    executor = getattr(store, "execute_idempotent", store.execute)
+    await executor(
         "INSERT INTO chat_messages (id, repo_id, user_id, role, content, citations, tool_calls, mode, latency_ms, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
         [str(uuid4()), repo_id, user_id, role, content, json.dumps(citations or []), json.dumps(tool_calls or []), mode, latency_ms, timestamp()],
     )
 
@@ -187,7 +188,16 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
                     workflow=workflow,
                 ),
                 get_conversation_history(store, repo["id"], current_user.id),
+                return_exceptions=True,
             )
+            if isinstance(conversation_history, Exception):
+                # Conversation history improves continuity but is not required
+                # to answer from the repository. A transient Turso read should
+                # not discard an otherwise valid retrieval result.
+                logger.warning("Conversation history unavailable for repository %s: %s", repo["id"], type(conversation_history).__name__)
+                conversation_history = []
+            if isinstance(chunks, Exception):
+                raise chunks
             # Keep the API response aligned with the retrieval evidence
             # contract. This final boundary protects citations and the LLM
             # context even if an older/compatibility retrieval path returns a
@@ -254,11 +264,17 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
                             logger.warning("Editing ticket secret is not configured; disabling PR action")
                             edit_ticket = None
         latency_ms = int((time.time() - started) * 1000)
-        await save_message(store, repo_id=repo["id"], user_id=current_user.id, role="user", content=question)
-        await save_message(
-            store, repo_id=repo["id"], user_id=current_user.id, role="assistant", content=answer,
-            citations=citations, tool_calls=tool_calls, mode=mode, latency_ms=latency_ms,
-        )
+        try:
+            await save_message(store, repo_id=repo["id"], user_id=current_user.id, role="user", content=question)
+            await save_message(
+                store, repo_id=repo["id"], user_id=current_user.id, role="assistant", content=answer,
+                citations=citations, tool_calls=tool_calls, mode=mode, latency_ms=latency_ms,
+            )
+        except Exception:
+            # Chat history is durable telemetry, not a prerequisite for the
+            # answer. Return the source-grounded result even if Turso briefly
+            # loses its write stream, and let the next request reconnect.
+            logger.warning("Could not persist chat history for repository %s", repo["id"], exc_info=True)
         return {
             "answer": answer, "mode": mode, "citations": citations, "tool_calls": tool_calls,
             "latency_ms": latency_ms, "tokens_used": 0, "model_profile": effective_model_profile,

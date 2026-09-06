@@ -26,10 +26,15 @@ class Settings(BaseSettings):
     embedding_model: str = "nvidia/nemotron-3-embed-1b"
     embedding_dimension: int = 2048
     nvidia_timeout_seconds: float = 90.0
-    nvidia_calls_per_minute: int = 20
+    # Application-side ceiling for hosted NVIDIA calls. This is deliberately
+    # configurable because NVIDIA assigns limits per account/model and may
+    # show a different value in the API Catalog. Forty is the common free
+    # prototype ceiling; operators should set this to the value shown for
+    # their key rather than assuming it increases NVIDIA's quota.
+    nvidia_calls_per_minute: int = 40
     # Preserve a few embedding slots for interactive questions while a large
     # repository is being indexed in the background.
-    query_embedding_reserve_per_minute: int = 4
+    query_embedding_reserve_per_minute: int = 8
     # Answers are source-grounded and intentionally concise. Avoiding extended
     # reasoning and oversized generations keeps the interactive chat responsive.
     nvidia_enable_thinking: bool = False
