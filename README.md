@@ -106,6 +106,8 @@ File selection, hashing, dependency extraction, and chunking are linear in the s
 
 The code editing review is file complete rather than citation excerpt based. Every proposed file is loaded from the current GitHub revision, compared against the generated replacement, and shown in its own tab. The review renders removed lines in red and added lines in green, reports the change counts, and uses a bounded large file fallback instead of freezing the browser. The server still applies exact grounded hunks and verifies each Git blob SHA before creating one atomic commit, so the visual diff never replaces the merge safety checks.
 
+Ingestion is two phase. Keyword chunks are written first, so the repository becomes searchable before semantic vectors finish. The status panel then reports real semantic progress and accepts questions during background embedding. Passage content hashes reuse vectors from the bounded Turso embedding cache, while unchanged files are skipped by the SHA 256 manifest. A small RSS guard reduces buffers above 350 MB and pauses new provider work above 450 MB to protect the 512 MB Render process. Deterministic onboarding metadata is built after source search is available rather than blocking it.
+
 ### Turso persistence
 
 Turso stores repository rows, file manifests, source chunks, native vectors, dependency edges, coverage reports, ingestion jobs, factual metadata, conversations, account usage, and billing orders. Chunk inserts use bounded idempotent batches. Read statements avoid unnecessary remote commits, and vector JSON is compacted before it is passed to the native vector function.
@@ -336,6 +338,9 @@ turso db create codebase-intel --wait
 turso db shell codebase-intel < turso/00_init.sql
 turso db shell codebase-intel < turso/01_trust_features.sql
 turso db shell codebase-intel < turso/02_billing.sql
+turso db shell codebase-intel < turso/03_github.sql
+turso db shell codebase-intel < turso/04_limits_and_github.sql
+turso db shell codebase-intel < turso/05_performance.sql
 turso db show codebase-intel --url
 turso db tokens create codebase-intel
 ```
@@ -367,6 +372,10 @@ EMBEDDING_PROGRESS_INTERVAL_BATCHES=4
 EMBEDDING_HEARTBEAT_INTERVAL_BATCHES=2
 INGESTION_CHUNK_WORKERS=2
 INGESTION_LARGE_FILE_SERIAL_BYTES=8000000
+MEMORY_TARGET_MB=350
+MEMORY_WARNING_MB=400
+MEMORY_CRITICAL_MB=450
+EMBEDDING_CONCURRENCY=1
 
 SUPABASE_URL=
 SUPABASE_KEY=
@@ -516,7 +525,11 @@ After deployment, verify the following flow.
 
 3. Submit a small public repository.
 
-4. Confirm the status moves through queued, cloning, chunking, embedding, summarizing, and ready.
+4. Confirm the status moves through queued, cloning, chunking, and ready. Once
+   keyword chunks are durable the repository is reported as searchable and can
+   be questioned immediately; the UI shows the real semantic embedding
+   percentage until it reaches ready. Repository metadata is refined in a
+   background task and never blocks source retrieval.
 
 5. Ask an implementation question and inspect the cited file paths and line ranges.
 

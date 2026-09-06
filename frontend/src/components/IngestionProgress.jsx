@@ -1,14 +1,17 @@
 const stages = [
   { id: 'queued', label: 'Queued', detail: 'Your repository is queued and will begin when the indexing worker is available.' },
   { id: 'cloning', label: 'Cloning', detail: 'Creating a temporary copy of the public repository.' },
+  { id: 'scanning', label: 'Scanning files', detail: 'Applying the source selection policy and recording exclusions.' },
+  { id: 'manifesting', label: 'Comparing changes', detail: 'Hashing source files so unchanged paths can be skipped.' },
   { id: 'chunking', label: 'Reading code', detail: 'Finding source files and organizing them into useful sections.' },
-  { id: 'embedding', label: 'Indexing', detail: 'Building the semantic index used to retrieve relevant evidence.' },
-  { id: 'summarizing', label: 'Mapping', detail: 'Preparing the repository map and onboarding context.' },
+  { id: 'keyword', label: 'Building search', detail: 'Writing keyword searchable chunks before semantic indexing.' },
+  { id: 'embedding', label: 'Semantic indexing', detail: 'Building the semantic index used to retrieve relevant evidence.' },
+  { id: 'finalizing', label: 'Finalizing', detail: 'Publishing coverage and durable progress metadata.' },
 ];
 
 const stageIndex = (status) => stages.findIndex((stage) => stage.id === status);
 
-export const isIngestionActive = (status) => stageIndex(status) >= 0;
+export const isIngestionActive = (status) => status === 'searchable' || stageIndex(status) >= 0;
 
 const parseEmbeddingProgress = (message) => {
   const match = /^Indexing (\d+) of (\d+) code sections \((\d+)%\)\./.exec(message || '');
@@ -17,6 +20,14 @@ const parseEmbeddingProgress = (message) => {
 };
 
 export const getIngestionStatus = (status, errorMessage) => {
+  if (status === 'searchable') {
+    return {
+      label: 'Ready to explore',
+      detail: 'Keyword search is available now. Semantic indexing is continuing in the background.',
+      index: stages.length - 1,
+      embeddingProgress: null,
+    };
+  }
   if (status === 'ready') {
     return { label: 'Ready to explore', detail: 'Indexing is complete. You can now ask questions about this codebase.', index: stages.length };
   }
@@ -35,20 +46,24 @@ export const getIngestionStatus = (status, errorMessage) => {
 
 const IngestionProgress = ({ repo, compact = false }) => {
   const info = getIngestionStatus(repo.status, repo.error_message);
-  const isReady = repo.status === 'ready';
+  const isSearchable = repo.status === 'searchable';
+  const isReady = repo.status === 'ready' || isSearchable;
   const isFailed = repo.status === 'failed';
   const active = isIngestionActive(repo.status);
   const baseProgress = Math.round(((info.index + 1) / stages.length) * 100);
-  const progress = isReady ? 100 : isFailed ? 0 : info.embeddingProgress
+  const semanticProgress = Number.isFinite(Number(repo.semantic_progress)) ? Number(repo.semantic_progress) : 0;
+  const progress = isSearchable ? Math.max(92, Math.min(99, semanticProgress)) : isReady ? 100 : isFailed ? 0 : info.embeddingProgress
     ? Math.round(((info.index + (info.embeddingProgress.percent / 100)) / stages.length) * 100)
     : baseProgress;
-  const activeLabel = info.embeddingProgress
+  const activeLabel = isSearchable
+    ? `Semantic indexing ${semanticProgress}%`
+    : info.embeddingProgress
     ? `Indexing ${info.embeddingProgress.completed} of ${info.embeddingProgress.total} sections`
     : info.label;
 
   if (compact) {
-    if (isReady) {
-      return <p className="mt-2 text-xs font-medium text-emerald-700">Ready to explore</p>;
+    if (isReady && !isSearchable) {
+      return <p className="mt-2 text-xs font-medium text-emerald-700">{isSearchable ? `Ready to explore · semantic indexing ${semanticProgress}%` : 'Ready to explore'}</p>;
     }
 
     if (isFailed) {
@@ -77,7 +92,7 @@ const IngestionProgress = ({ repo, compact = false }) => {
         </div>
         <span className="text-caption font-semibold uppercase tracking-wider text-warm-gray">{isReady ? 'Complete' : isFailed ? 'Stopped' : info.embeddingProgress ? `${info.embeddingProgress.percent}% indexed` : `Step ${info.index + 1} of ${stages.length}`}</span>
       </div>
-      <p className="mt-4 max-w-2xl text-sm leading-relaxed text-pewter">{repo.error_message || info.detail}</p>
+      <p className="mt-4 max-w-2xl text-sm leading-relaxed text-pewter">{isSearchable ? info.detail : repo.error_message || info.detail}</p>
       {repo.eligible_files > 0 && (
         <p className="mt-2 text-xs leading-relaxed text-warm-gray">
           {isReady

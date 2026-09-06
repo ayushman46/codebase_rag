@@ -1,10 +1,12 @@
 """Durable Turso-backed repository ingestion pipeline."""
 
 import asyncio
+import gc
 import hashlib
 import json
 import os
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -21,6 +23,7 @@ from ingest.cloner import (
 )
 from ingest.dependencies import build_manifest_and_dependency_manifest
 from ingest.embedder import EmbeddingUnavailableError, embed_chunks
+from ingest.memory import pressure_level, rss_mb, wait_for_memory_headroom
 from ingest.summarizer import build_kt_cache
 from quota import ensure_repository_usage_capacity
 
@@ -38,6 +41,82 @@ class IngestionCancelledError(RuntimeError):
 
 def timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+async def update_index_state(store, repo_id: str, *, phase: str, keyword_files: int | None = None,
+                             keyword_chunks: int | None = None, semantic_progress: int | None = None,
+                             embedding_status: str | None = None, searchable_at: str | None = None,
+                             semantic_ready_at: str | None = None) -> None:
+    """Publish durable, user-visible ingestion phase without changing repos.status."""
+    assignments = ["phase = ?", "updated_at = ?"]
+    update_args: list[object] = [phase, timestamp()]
+    for field, value in (("keyword_files", keyword_files), ("keyword_chunks", keyword_chunks),
+                         ("semantic_progress", semantic_progress), ("embedding_status", embedding_status),
+                         ("searchable_at", searchable_at), ("semantic_ready_at", semantic_ready_at)):
+        if value is not None:
+            assignments.append(f"{field} = ?")
+            update_args.append(value)
+    update_args.append(repo_id)
+    result = await store.execute(
+        "UPDATE repo_index_state SET " + ", ".join(assignments) + " WHERE repo_id = ?", update_args
+    )
+    if result.rows_affected:
+        return
+    await store.execute(
+        "INSERT OR IGNORE INTO repo_index_state (repo_id, phase, keyword_files, keyword_chunks, semantic_progress, "
+        "embedding_status, searchable_at, semantic_ready_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [repo_id, phase, keyword_files or 0, keyword_chunks or 0, semantic_progress or 0,
+         embedding_status or "pending", searchable_at, semantic_ready_at, timestamp()],
+    )
+
+
+async def publish_index_progress(store, repo_id: str, *, keyword_files: int = 0,
+                                 embedding_status: str | None = None, allow_ready: bool = False) -> tuple[int, int]:
+    """Compute real semantic progress from persisted rows, never a fake timer."""
+    totals = await store.fetch_one(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded "
+        "FROM chunks WHERE repo_id = ?", [repo_id]
+    ) or {}
+    total = int(totals.get("total") or 0)
+    embedded = int(totals.get("embedded") or 0)
+    progress = 100 if total == 0 else min(100, int((embedded / total) * 100))
+    phase = "ready" if allow_ready and progress >= 100 and embedding_status != "degraded" else "searchable"
+    await update_index_state(
+        store, repo_id, phase=phase, keyword_files=keyword_files, keyword_chunks=total,
+        semantic_progress=progress, embedding_status=embedding_status or ("complete" if progress >= 100 else "running"),
+        searchable_at=timestamp() if phase in {"searchable", "ready"} else None,
+        semantic_ready_at=timestamp() if phase == "ready" else None,
+    )
+    return total, progress
+
+
+async def persist_ingestion_metrics(store, job_id: str | None, repo_id: str, metrics: dict) -> None:
+    if not settings.ingestion_metrics_enabled:
+        return
+    if not job_id:
+        return
+    await store.execute(
+        "INSERT INTO ingestion_metrics (job_id, repo_id, metrics_json, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(job_id) DO UPDATE SET metrics_json = excluded.metrics_json, updated_at = excluded.updated_at",
+        [job_id, repo_id, json.dumps(metrics, separators=(",", ":")), timestamp()],
+    )
+
+
+async def _background_build_kt_cache(store, repo_id: str) -> None:
+    """Build deterministic onboarding metadata after the source is searchable."""
+    try:
+        indexed_chunks = await store.fetch_all(
+            "SELECT file_path, start_line, end_line, language, symbols FROM chunks "
+            "WHERE repo_id = ? ORDER BY file_path, start_line LIMIT ?",
+            [repo_id, settings.max_repository_chunks],
+        )
+        await build_kt_cache(store, repo_id, indexed_chunks)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Metadata is a convenience and must never turn a searchable index
+        # into a failed job. The next re-index can rebuild it safely.
+        logger.warning("Background repository metadata failed for %s", repo_id, exc_info=True)
 
 
 async def run_blocking(func, *args, **kwargs):
@@ -163,14 +242,28 @@ async def enforce_ingestion_capacity(store, user_id: str, github_url: str) -> No
 async def enqueue_ingestion_job(store, github_url: str, user_id: str, repo_id: str):
     """Persist durable queue work before returning an API response."""
     now = timestamp()
+    proposed_job_id = str(uuid4())
     await store.execute(
         "INSERT INTO ingestion_jobs (id, repo_id, user_id, github_url, status, attempts, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?) "
         "ON CONFLICT(repo_id) DO UPDATE SET user_id = excluded.user_id, github_url = excluded.github_url, "
         "status = 'queued', attempts = 0, claimed_at = NULL, heartbeat_at = NULL, claim_token = NULL, "
         "finished_at = NULL, last_error = NULL, updated_at = excluded.updated_at",
-        [str(uuid4()), repo_id, user_id, github_url, now, now],
+        [proposed_job_id, repo_id, user_id, github_url, now, now],
     )
+    # An upsert keeps the original row id. Re-read it after the write so two
+    # concurrent submissions cannot create metadata pointing at a losing id.
+    actual_job = await store.fetch_one("SELECT id FROM ingestion_jobs WHERE repo_id = ?", [repo_id])
+    job_id = str((actual_job or {}).get("id") or proposed_job_id)
+    # New submissions get the highest queue priority. The separate metadata
+    # table keeps this additive for databases created before the performance
+    # migration and lets the claim query remain atomic.
+    await store.execute(
+        "INSERT INTO ingestion_job_meta (job_id, priority, phase, progress, updated_at) VALUES (?, ?, 'queued', 0, ?) "
+        "ON CONFLICT(job_id) DO UPDATE SET priority = excluded.priority, phase = 'queued', progress = 0, updated_at = excluded.updated_at",
+        [job_id, 10, now],
+    )
+    await update_index_state(store, repo_id, phase="queued", semantic_progress=0, embedding_status="pending")
 
 
 async def job_is_active(store, repo_id: str, claim_token: str | None = None) -> bool:
@@ -190,10 +283,19 @@ async def raise_if_ingestion_cancelled(store, repo_id: str, claim_token: str | N
 
 async def heartbeat_job(store, job_id: str | None, claim_token: str | None) -> None:
     if job_id and claim_token:
+        now = timestamp()
         await store.execute(
             "UPDATE ingestion_jobs SET heartbeat_at = ?, updated_at = ? "
             "WHERE id = ? AND status = 'processing' AND claim_token = ?",
-            [timestamp(), timestamp(), job_id, claim_token],
+            [now, now, job_id, claim_token],
+        )
+        await store.execute(
+            "UPDATE ingestion_job_meta SET phase = COALESCE((SELECT phase FROM repo_index_state s "
+            "JOIN ingestion_jobs j ON j.repo_id = s.repo_id WHERE j.id = ?), phase), "
+            "progress = COALESCE((SELECT semantic_progress FROM repo_index_state s "
+            "JOIN ingestion_jobs j ON j.repo_id = s.repo_id WHERE j.id = ?), progress), updated_at = ? "
+            "WHERE job_id = ?",
+            [job_id, job_id, now, job_id],
         )
 
 
@@ -235,28 +337,55 @@ async def embed_repository_chunks(
             ),
         )
 
+    # Hash only the passage content, not its path, so identical code in two
+    # files can reuse one vector. The hash and cache lookup are bounded to the
+    # current buffer; no repository-wide embedding map is retained in RAM.
+    for chunk in chunks:
+        chunk.setdefault("content_hash", hashlib.sha256(str(chunk.get("content") or "").encode("utf-8")).hexdigest())
+    cache_reader = getattr(store, "get_embedding_cache", None)
+    cached = await cache_reader([chunk["content_hash"] for chunk in chunks]) if cache_reader else {}
+    cache_hits = 0
+    pending_by_hash: dict[str, dict] = {}
+    for chunk in chunks:
+        vector = cached.get(chunk["content_hash"])
+        if vector is not None:
+            chunk["embedding"] = vector
+            chunk["_embedding_cache_hit"] = True
+            cache_hits += 1
+        else:
+            # One provider request per distinct passage in this bounded
+            # buffer; duplicate files receive the same validated vector.
+            pending_by_hash.setdefault(chunk["content_hash"], chunk)
+
+    pending = list(pending_by_hash.values())
+
+    if cache_hits:
+        await report_progress(cache_hits)
+
     if progress_offset == 0:
         await report_progress(0)
     offset = 0
     batch_number = 0
-    while offset < len(chunks):
+    while offset < len(pending):
         batch_number += 1
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
-        current_size = min(batch_size, len(chunks) - offset)
-        batch = chunks[offset:offset + current_size]
+        await wait_for_memory_headroom()
+        current_size = min(batch_size, len(pending) - offset)
+        batch = pending[offset:offset + current_size]
         observed_batch_size = [current_size]
-        embedded_chunks.extend(await run_blocking(
+        await run_blocking(
             embed_chunks,
             batch,
             initial_batch_size=current_size,
             on_batch_size_change=lambda value: observed_batch_size.__setitem__(0, value),
-        ))
-        completed = len(embedded_chunks)
+            on_request=lambda: metrics.__setitem__("embedding_requests", metrics["embedding_requests"] + 1),
+        )
+        offset += current_size
+        completed = sum(1 for item in chunks if item.get("embedding") is not None)
         # Persist a provider payload reduction for the remainder of this
         # repository. A payload-limited endpoint should not reject the first
         # batch of every subsequent request.
         batch_size = max(minimum_batch_size, min(current_size, observed_batch_size[0]))
-        offset += current_size
         # Progress is useful to the UI but does not need one remote write per
         # provider request. Cancellation remains checked for every batch.
         if batch_number % progress_interval == 0 or completed == total_chunks:
@@ -265,6 +394,31 @@ async def embed_repository_chunks(
             batch_number % heartbeat_interval == 0 or completed == total_chunks
         ):
             await heartbeat_job(store, job_id, claim_token)
+        if pressure_level() in {"warning", "critical"}:
+            # Drop transient references before the next provider request. The
+            # next call also re-checks the critical threshold and pauses if
+            # Render is under pressure.
+            gc.collect()
+    # Fan vectors back out to duplicate passages in this bounded buffer.
+    vectors_by_hash = {
+        chunk["content_hash"]: chunk.get("embedding")
+        for chunk in pending
+        if chunk.get("embedding") is not None
+    }
+    for chunk in chunks:
+        if chunk.get("embedding") is None and chunk["content_hash"] in vectors_by_hash:
+            chunk["embedding"] = vectors_by_hash[chunk["content_hash"]]
+    embedded_chunks = list(chunks)
+    cache_writer = getattr(store, "save_embedding_cache", None)
+    if cache_writer:
+        cache_records = {}
+        for chunk in embedded_chunks:
+            content_hash = chunk.get("content_hash")
+            if content_hash and content_hash not in cached and chunk.get("embedding") is not None:
+                cache_records[content_hash] = {
+                    "content_hash": content_hash, "embedding": chunk["embedding"], "updated_at": timestamp(),
+                }
+        await cache_writer(list(cache_records.values()))
     return embedded_chunks
 
 
@@ -311,7 +465,9 @@ async def claim_next_ingestion_job(store):
     result = await store.execute(
         "UPDATE ingestion_jobs SET status = 'processing', claimed_at = ?, heartbeat_at = ?, claim_token = ?, "
         "attempts = attempts + 1, last_error = NULL, updated_at = ? "
-        "WHERE id = (SELECT id FROM ingestion_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1) "
+        "WHERE id = (SELECT queued.id FROM ingestion_jobs queued "
+        "LEFT JOIN ingestion_job_meta meta ON meta.job_id = queued.id "
+        "WHERE queued.status = 'queued' ORDER BY COALESCE(meta.priority, 20) ASC, queued.created_at ASC LIMIT 1) "
         "AND status = 'queued' "
         "RETURNING id, repo_id, user_id, github_url, attempts",
         [now, now, claim_token, now],
@@ -390,7 +546,7 @@ async def replace_changed_file_chunks(store, repo_id: str, changed_paths: set[st
 
 
 async def persist_file_manifest(store, repo_id: str, manifest: dict[str, dict[str, int | str]]) -> None:
-    statements = []
+    statements: list[Statement] = []
     for file_path, metadata in manifest.items():
         statements.append(Statement(
             "INSERT INTO repo_files (repo_id, file_path, content_hash, byte_size, updated_at) VALUES (?, ?, ?, ?, ?) "
@@ -398,6 +554,9 @@ async def persist_file_manifest(store, repo_id: str, manifest: dict[str, dict[st
             "byte_size = excluded.byte_size, updated_at = excluded.updated_at",
             [repo_id, file_path, metadata["content_hash"], metadata["byte_size"], timestamp()],
         ))
+        if len(statements) >= max(1, settings.chunk_insert_batch_size):
+            await store.batch(statements)
+            statements.clear()
     if statements:
         await store.batch(statements)
 
@@ -405,14 +564,16 @@ async def persist_file_manifest(store, repo_id: str, manifest: dict[str, dict[st
 async def persist_dependency_manifest(store, repo_id: str, dependencies: list[dict]) -> None:
     """Replace the small resolved dependency graph after a successful index."""
     await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo_id])
-    statements = [
-        Statement(
+    statements: list[Statement] = []
+    for edge in dependencies:
+        statements.append(Statement(
             "INSERT OR IGNORE INTO repo_dependencies (repo_id, source_file, target_file, import_name, line_number) "
             "VALUES (?, ?, ?, ?, ?)",
             [repo_id, edge["source_file"], edge["target_file"], edge["import_name"], edge["line_number"]],
-        )
-        for edge in dependencies
-    ]
+        ))
+        if len(statements) >= max(1, settings.chunk_insert_batch_size):
+            await store.batch(statements)
+            statements.clear()
     if statements:
         await store.batch(statements)
 
@@ -499,6 +660,16 @@ async def run_ingestion_for_repo(
     job_id: str | None = None, claim_token: str | None = None,
 ):
     repo_path: str | None = None
+    started_at = time.perf_counter()
+    metrics = {
+        "clone_ms": 0, "scan_ms": 0, "manifest_ms": 0, "chunk_ms": 0,
+        "keyword_index_ms": 0, "embedding_ms": 0, "database_ms": 0,
+        "dependency_ms": 0, "summarization_ms": 0, "total_ms": 0,
+        "files_selected": 0, "files_excluded": 0, "bytes_selected": 0,
+        "chunks_created": 0, "chunks_embedded": 0, "embedding_requests": 0,
+        "embedding_cache_hits": 0, "embedding_failures": 0, "db_batches": 0,
+        "peak_rss_mb": 0,
+    }
     try:
         canonical_url = normalize_github_url(github_url)
         if repo_id is None:
@@ -509,12 +680,21 @@ async def run_ingestion_for_repo(
         # prepared. Only stale file paths are replaced after the clone passes
         # validation, so a failed re-index does not erase working evidence.
         await update_repo(store, repo_id, status="cloning", error_message=None)
+        await update_index_state(store, repo_id, phase="cloning", embedding_status="pending")
+        clone_started = time.perf_counter()
         repo_path = await run_blocking(clone_repo_shallow, canonical_url)
+        metrics["clone_ms"] = int((time.perf_counter() - clone_started) * 1000)
 
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
         await update_repo(store, repo_id, status="chunking")
+        await update_index_state(store, repo_id, phase="scanning")
+        scan_started = time.perf_counter()
         selection_report = await run_blocking(get_file_selection_report, repo_path)
+        metrics["scan_ms"] = int((time.perf_counter() - scan_started) * 1000)
+        metrics["files_selected"] = int(selection_report.get("eligible_files", 0))
+        metrics["files_excluded"] = int(selection_report.get("excluded_files", 0))
+        metrics["bytes_selected"] = int(selection_report.get("eligible_bytes", 0))
         await persist_coverage(store, repo_id, selection_report)
         files = selection_report["files"]
         if not files:
@@ -534,11 +714,16 @@ async def run_ingestion_for_repo(
         # CPU/file work together and overlap it with the metadata lookup so a
         # large repository does not pay three full serial passes before
         # chunking starts.
+        await update_index_state(store, repo_id, phase="manifesting")
+        manifest_started = time.perf_counter()
         previous_rows_task = store.fetch_all(
             "SELECT file_path, content_hash FROM repo_files WHERE repo_id = ?", [repo_id]
         )
         manifest_task = run_blocking(build_manifest_and_dependency_manifest, files, repo_path)
         (manifest, dependencies), previous_rows = await asyncio.gather(manifest_task, previous_rows_task)
+        metrics["manifest_ms"] = int((time.perf_counter() - manifest_started) * 1000)
+        metrics["dependency_ms"] = metrics["manifest_ms"]
+        await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         previous_manifest = {row["file_path"]: row["content_hash"] for row in previous_rows}
         changed_paths = {
             path for path, metadata in manifest.items()
@@ -561,46 +746,75 @@ async def run_ingestion_for_repo(
         existing_count = await get_repo_chunk_count(store, repo_id)
         semantic_index_warning = None
         await update_repo(store, repo_id, status="chunking")
+        chunk_started = time.perf_counter()
+        keyword_published = False
 
-        async def persist_embedded_chunks(embedded_chunks: list[dict]) -> None:
-            for offset in range(0, len(embedded_chunks), max(1, settings.chunk_insert_batch_size)):
+        async def persist_keyword_chunks(records: list[dict]) -> None:
+            for offset in range(0, len(records), max(1, settings.chunk_insert_batch_size)):
                 await raise_if_ingestion_cancelled(store, repo_id, claim_token)
                 await heartbeat_job(store, job_id, claim_token)
-                records = [
-                    {
-                        "id": str(uuid4()), "repo_id": repo_id, "file_path": chunk["file_path"],
-                        "start_line": chunk["start_line"], "end_line": chunk["end_line"],
-                        "language": chunk["language"], "symbols": chunk.get("symbols", []),
-                        "content": chunk["content"], "embedding": chunk.get("embedding"),
-                    }
-                    for chunk in embedded_chunks[offset:offset + max(1, settings.chunk_insert_batch_size)]
-                ]
-                await store.insert_chunks(records)
-                del records
+                db_started = time.perf_counter()
+                await store.insert_chunks(records[offset:offset + max(1, settings.chunk_insert_batch_size)])
+                metrics["database_ms"] += int((time.perf_counter() - db_started) * 1000)
+                metrics["db_batches"] += 1
+
+        async def persist_embedding_updates(records: list[dict]) -> None:
+            updater = getattr(store, "update_chunk_embeddings", None)
+            if not updater:
+                return
+            for offset in range(0, len(records), max(1, settings.chunk_insert_batch_size)):
+                await raise_if_ingestion_cancelled(store, repo_id, claim_token)
+                db_started = time.perf_counter()
+                await updater(records[offset:offset + max(1, settings.chunk_insert_batch_size)])
+                metrics["database_ms"] += int((time.perf_counter() - db_started) * 1000)
+                metrics["db_batches"] += 1
 
         chunk_buffer: list[dict] = []
         embedded_count = 0
         embeddings_disabled = False
 
         async def flush_chunk_buffer() -> None:
-            nonlocal chunk_buffer, embedded_count, semantic_index_warning, embeddings_disabled
+            nonlocal chunk_buffer, embedded_count, semantic_index_warning, embeddings_disabled, keyword_published
             if not chunk_buffer:
                 return
             batch = chunk_buffer
             chunk_buffer = []
-            await update_repo(store, repo_id, status="embedding")
+            records = [
+                {
+                    "id": str(uuid4()), "repo_id": repo_id, "file_path": chunk["file_path"],
+                    "start_line": chunk["start_line"], "end_line": chunk["end_line"],
+                    "language": chunk["language"], "symbols": chunk.get("symbols", []),
+                    "content": chunk["content"], "embedding": None,
+                    "content_hash": hashlib.sha256(str(chunk.get("content") or "").encode("utf-8")).hexdigest(),
+                }
+                for chunk in batch
+            ]
+            keyword_started = time.perf_counter()
+            await persist_keyword_chunks(records)
+            await raise_if_ingestion_cancelled(store, repo_id, claim_token)
+            metrics["keyword_index_ms"] += int((time.perf_counter() - keyword_started) * 1000)
+            if not keyword_published:
+                keyword_published = True
+                await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message="Codebase ready to explore. Semantic indexing is continuing in the background.")
+                await update_index_state(store, repo_id, phase="searchable", keyword_files=len(chunked_paths), keyword_chunks=await get_repo_chunk_count(store, repo_id), semantic_progress=0, embedding_status="running", searchable_at=timestamp())
             if embeddings_disabled:
-                embedded_chunks = [{**chunk, "embedding": None} for chunk in batch]
+                embedded_chunks = records
             else:
                 try:
+                    embedding_started = time.perf_counter()
                     embedded_chunks = await embed_repository_chunks(
                         store,
                         repo_id,
-                        batch,
+                        records,
                         job_id,
                         claim_token,
                         progress_offset=embedded_count,
+                        progress_total=max(existing_count + new_chunk_count, 1),
                     )
+                    metrics["embedding_ms"] += int((time.perf_counter() - embedding_started) * 1000)
+                    metrics["chunks_embedded"] += sum(1 for chunk in embedded_chunks if chunk.get("embedding") is not None)
+                    metrics["embedding_cache_hits"] += sum(1 for chunk in embedded_chunks if chunk.get("_embedding_cache_hit"))
+                    await persist_embedding_updates(embedded_chunks)
                 except EmbeddingUnavailableError as error:
                     # A provider outage is job-wide, not batch-local. Do not
                     # spend another five retries for every subsequent buffer.
@@ -610,10 +824,18 @@ async def run_ingestion_for_repo(
                         "NVIDIA semantic embeddings are temporarily unavailable. "
                         "This repository is ready with keyword retrieval; re-index later to restore semantic search."
                     )
-                    embedded_chunks = [{**chunk, "embedding": None} for chunk in batch]
-            await persist_embedded_chunks(embedded_chunks)
+                    metrics["embedding_failures"] += 1
+                    embedded_chunks = records
+            _, semantic_progress = await publish_index_progress(
+                store, repo_id, keyword_files=len(chunked_paths),
+                embedding_status="degraded" if embeddings_disabled else None,
+                allow_ready=False,
+            )
             embedded_count += len(embedded_chunks)
+            metrics["chunks_created"] += len(records)
+            metrics["peak_rss_mb"] = max(metrics["peak_rss_mb"], round(rss_mb(), 1))
             del embedded_chunks
+            del records
             del batch
 
         file_index = 0
@@ -628,7 +850,10 @@ async def run_ingestion_for_repo(
             if existing_count + new_chunk_count > settings.max_repository_chunks:
                 raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
             chunk_buffer.extend(file_chunks)
-            if len(chunk_buffer) >= max(1, settings.embedding_chunk_buffer_size):
+            configured_buffer = max(1, settings.embedding_chunk_buffer_size)
+            if pressure_level() in {"elevated", "warning", "critical"}:
+                configured_buffer = max(16, configured_buffer // 2)
+            if len(chunk_buffer) >= configured_buffer:
                 await flush_chunk_buffer()
             # Keep progress alive while a buffer is below the provider
             # threshold and no embedding request has completed yet.
@@ -641,6 +866,7 @@ async def run_ingestion_for_repo(
             del file_chunks
 
         await flush_chunk_buffer()
+        metrics["chunk_ms"] = int((time.perf_counter() - chunk_started) * 1000)
 
         chunking_failed_paths = sorted(changed_paths - chunked_paths)
         if chunking_failed_paths:
@@ -664,12 +890,23 @@ async def run_ingestion_for_repo(
 
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
-        await update_repo(store, repo_id, status="summarizing")
-        indexed_chunks = await store.fetch_all(
-            "SELECT file_path, start_line, end_line, language, symbols FROM chunks "
-            "WHERE repo_id = ? ORDER BY file_path, start_line LIMIT ?", [repo_id, settings.max_repository_chunks]
+        # Metadata is deliberately out of the critical path. Source search is
+        # already durable; a restart can safely regenerate this cache later.
+        asyncio.create_task(_background_build_kt_cache(store, repo_id))
+        _, semantic_progress = await publish_index_progress(
+            store, repo_id, keyword_files=len(chunked_paths),
+            embedding_status="degraded" if embeddings_disabled else None,
+            allow_ready=True,
         )
-        await build_kt_cache(store, repo_id, indexed_chunks)
+        if semantic_progress >= 100 and not embeddings_disabled:
+            await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message=None)
+            await update_index_state(store, repo_id, phase="ready", semantic_progress=100, embedding_status="complete", semantic_ready_at=timestamp())
+        else:
+            await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message=semantic_index_warning)
+            await update_index_state(store, repo_id, phase="searchable", semantic_progress=semantic_progress, embedding_status="degraded" if embeddings_disabled else "running")
+        metrics["total_ms"] = int((time.perf_counter() - started_at) * 1000)
+        metrics["peak_rss_mb"] = max(metrics["peak_rss_mb"], round(rss_mb(), 1))
+        await persist_ingestion_metrics(store, job_id, repo_id, metrics)
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         if job_id and claim_token:
             # Progress is temporarily stored in the existing message column
@@ -689,6 +926,10 @@ async def run_ingestion_for_repo(
             await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo_id])
             await store.execute("DELETE FROM repo_coverage WHERE repo_id = ?", [repo_id])
             await update_repo(store, repo_id, status="cancelled", chunk_count=0, error_message="Indexing stopped by you.")
+            try:
+                await update_index_state(store, repo_id, phase="cancelled", keyword_chunks=0, semantic_progress=0, embedding_status="degraded")
+            except Exception:
+                logger.debug("Could not publish cancelled ingestion state", exc_info=True)
         return False
     except Exception as error:
         error_message = str(error).strip() if isinstance(error, (ValueError, RepositoryValidationError)) else explain_database_error(error)
@@ -699,6 +940,13 @@ async def run_ingestion_for_repo(
             logger.exception("Repository ingestion failed")
         if repo_id:
             await update_repo(store, repo_id, status="failed", error_message=error_message[:500])
+            try:
+                await update_index_state(store, repo_id, phase="failed", embedding_status="degraded")
+                metrics["total_ms"] = int((time.perf_counter() - started_at) * 1000)
+                metrics["peak_rss_mb"] = max(metrics["peak_rss_mb"], round(rss_mb(), 1))
+                await persist_ingestion_metrics(store, job_id, repo_id, metrics)
+            except Exception:
+                logger.debug("Could not persist failed ingestion metrics", exc_info=True)
         return False
     finally:
         if repo_path:

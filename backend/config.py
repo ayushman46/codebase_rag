@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # 512 MB instance never holds several 50 MB source files at once.
     ingestion_chunk_workers: int = 2
     ingestion_large_file_serial_bytes: int = 8_000_000
+    # Keep a substantial RSS margin below Render's 512 MB limit. The worker
+    # shrinks buffers and pauses new provider work when these thresholds are
+    # crossed instead of intentionally approaching an OOM kill.
+    memory_target_mb: int = 350
+    memory_warning_mb: int = 400
+    memory_critical_mb: int = 450
+    # One bounded producer, one embedding worker, and one database writer is
+    # the safe default for the single 512 MB Render service.
+    embedding_concurrency: int = 1
+    ingestion_metrics_enabled: bool = True
     supabase_url: str = ""
     supabase_key: str = ""
     # Supabase remains the authentication provider. All application data is

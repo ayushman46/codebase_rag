@@ -182,7 +182,8 @@ const RepoList = () => {
       <div className="border-y border-sand">
         {repos.map((repo) => {
           const isSelected = selectedRepo === repo.repo_name;
-          const isReady = repo.status === 'ready';
+          const isSearchable = repo.status === 'searchable';
+          const isReady = repo.status === 'ready' || isSearchable;
           const isCancelled = repo.status === 'cancelled';
           const isActive = isIngestionActive(repo.status);
           const isRetrying = retryingRepoId === repo.id;
@@ -197,7 +198,7 @@ const RepoList = () => {
                   <div className="flex items-start gap-3">
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-base font-semibold tracking-tight text-ink-black">{repo.repo_name}</p>
-                      <p className={`mt-1.5 text-xs font-semibold ${stateClass}`}>{isReady ? 'Ready' : repo.status === 'failed' ? 'Needs attention' : status.label}</p>
+                      <p className={`mt-1.5 text-xs font-semibold ${stateClass}`}>{isSearchable ? 'Ready to explore' : isReady ? 'Ready' : repo.status === 'failed' ? 'Needs attention' : status.label}</p>
                     </div>
                     <span className="shrink-0 pt-0.5 text-xs text-warm-gray">{repo.chunk_count || 0} chunks</span>
                     <div className="relative -mr-1 -mt-1">

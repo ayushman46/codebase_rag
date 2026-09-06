@@ -46,7 +46,11 @@ def timestamp() -> str:
 
 async def get_owned_repo(store, repo_name: str, user_id: str):
     repo = await store.fetch_one(
-        "SELECT id, status FROM repos WHERE repo_name = ? AND user_id = ?", [repo_name, user_id]
+        "SELECT r.id, "
+        "COALESCE(s.phase, r.status) AS status, "
+        "COALESCE(s.phase, r.status) AS index_phase, COALESCE(s.semantic_progress, 0) AS semantic_progress "
+        "FROM repos r LEFT JOIN repo_index_state s ON s.repo_id = r.id "
+        "WHERE r.repo_name = ? AND r.user_id = ?", [repo_name, user_id]
     )
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found.")
@@ -148,7 +152,7 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
         await assert_turso_schema()
         store = get_turso_store()
         repo = await get_owned_repo(store, req.repo_name, current_user.id)
-        if repo["status"] != "ready":
+        if repo["status"] not in {"ready", "searchable"}:
             raise HTTPException(status_code=409, detail="Repository is not ready for questions. Check the repository status and try again.")
         question = req.question.strip()
         if not question:

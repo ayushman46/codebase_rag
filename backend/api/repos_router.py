@@ -44,12 +44,16 @@ def _escape_like(value: str) -> str:
 
 async def owned_repo(store, user_id: str, repo_name: str):
     repo = await store.fetch_one(
-        "SELECT r.id, r.repo_name, r.github_url, r.status, r.chunk_count, r.error_message, r.created_at, "
+        "SELECT r.id, r.repo_name, r.github_url, "
+        "COALESCE(s.phase, r.status) AS status, "
+        "r.chunk_count, r.error_message, r.created_at, COALESCE(s.phase, r.status) AS index_phase, "
+        "COALESCE(s.semantic_progress, 0) AS semantic_progress, COALESCE(s.embedding_status, 'complete') AS embedding_status, "
         "COALESCE(c.total_seen_files, 0) AS total_seen_files, COALESCE(c.eligible_files, 0) AS eligible_files, "
         "COALESCE(c.indexed_files, 0) AS indexed_files, COALESCE(c.excluded_files, 0) AS excluded_files, "
         "COALESCE(c.excluded_bytes, 0) AS excluded_bytes, COALESCE(c.excluded_reasons, '{}') AS excluded_reasons, "
         "COALESCE(c.excluded_paths, '[]') AS excluded_paths "
         "FROM repos r LEFT JOIN repo_coverage c ON c.repo_id = r.id "
+        "LEFT JOIN repo_index_state s ON s.repo_id = r.id "
         "WHERE r.user_id = ? AND r.repo_name = ?",
         [user_id, repo_name],
     )
@@ -66,7 +70,7 @@ async def get_status(repo_name: str, current_user=Depends(get_current_user)):
         return {key: repo[key] for key in (
             "status", "chunk_count", "error_message", "total_seen_files", "eligible_files",
             "indexed_files", "excluded_files", "excluded_bytes", "excluded_reasons",
-            "excluded_paths",
+            "excluded_paths", "index_phase", "semantic_progress", "embedding_status",
         )}
     except HTTPException:
         raise
@@ -82,12 +86,16 @@ async def list_repos(current_user=Depends(get_current_user)):
     try:
         await assert_turso_schema()
         return await get_turso_store().fetch_all(
-            "SELECT r.id, r.repo_name, r.github_url, r.status, r.chunk_count, r.created_at, r.error_message, "
+            "SELECT r.id, r.repo_name, r.github_url, "
+            "COALESCE(s.phase, r.status) AS status, "
+            "r.chunk_count, r.created_at, r.error_message, COALESCE(s.phase, r.status) AS index_phase, "
+            "COALESCE(s.semantic_progress, 0) AS semantic_progress, COALESCE(s.embedding_status, 'complete') AS embedding_status, "
             "COALESCE(c.total_seen_files, 0) AS total_seen_files, COALESCE(c.eligible_files, 0) AS eligible_files, "
             "COALESCE(c.indexed_files, 0) AS indexed_files, COALESCE(c.excluded_files, 0) AS excluded_files, "
             "COALESCE(c.excluded_bytes, 0) AS excluded_bytes, COALESCE(c.excluded_reasons, '{}') AS excluded_reasons, "
             "COALESCE(c.excluded_paths, '[]') AS excluded_paths "
             "FROM repos r LEFT JOIN repo_coverage c ON c.repo_id = r.id "
+            "LEFT JOIN repo_index_state s ON s.repo_id = r.id "
             "WHERE r.user_id = ? ORDER BY r.created_at DESC",
             [current_user.id],
         )
@@ -104,12 +112,16 @@ async def list_repo_statuses(current_user=Depends(get_current_user)):
     try:
         await assert_turso_schema()
         return await get_turso_store().fetch_all(
-            "SELECT r.repo_name, r.status, r.chunk_count, r.error_message, "
+            "SELECT r.repo_name, "
+            "COALESCE(s.phase, r.status) AS status, "
+            "r.chunk_count, r.error_message, COALESCE(s.phase, r.status) AS index_phase, "
+            "COALESCE(s.semantic_progress, 0) AS semantic_progress, COALESCE(s.embedding_status, 'complete') AS embedding_status, "
             "COALESCE(c.total_seen_files, 0) AS total_seen_files, COALESCE(c.eligible_files, 0) AS eligible_files, "
             "COALESCE(c.indexed_files, 0) AS indexed_files, COALESCE(c.excluded_files, 0) AS excluded_files, "
             "COALESCE(c.excluded_bytes, 0) AS excluded_bytes, COALESCE(c.excluded_reasons, '{}') AS excluded_reasons, "
             "COALESCE(c.excluded_paths, '[]') AS excluded_paths "
             "FROM repos r LEFT JOIN repo_coverage c ON c.repo_id = r.id "
+            "LEFT JOIN repo_index_state s ON s.repo_id = r.id "
             "WHERE r.user_id = ? "
             "ORDER BY r.created_at DESC",
             [current_user.id],

@@ -76,13 +76,17 @@ services:
       - key: EMBEDDING_DIMENSION
         value: "2048"
       - key: EMBEDDING_BATCH_SIZE
-        value: "16"
+        value: "32"
       - key: EMBEDDING_MIN_BATCH_SIZE
         value: "4"
       - key: EMBEDDING_CHUNK_BUFFER_SIZE
-        value: "64"
+        value: "128"
+      - key: EMBEDDING_BATCH_MAX_CHARACTERS
+        value: "120000"
       - key: NVIDIA_CALLS_PER_MINUTE
-        value: "20"
+        value: "40"
+      - key: QUERY_EMBEDDING_RESERVE_PER_MINUTE
+        value: "8"
       - key: EMBEDDING_RETRY_ATTEMPTS
         value: "5"
       - key: EMBEDDING_RETRY_BASE_SECONDS
@@ -91,6 +95,14 @@ services:
         value: "4"
       - key: EMBEDDING_HEARTBEAT_INTERVAL_BATCHES
         value: "2"
+      - key: MEMORY_TARGET_MB
+        value: "350"
+      - key: MEMORY_WARNING_MB
+        value: "400"
+      - key: MEMORY_CRITICAL_MB
+        value: "450"
+      - key: EMBEDDING_CONCURRENCY
+        value: "1"
       - key: MAX_REPOSITORY_BYTES
         value: "100000000"
       - key: MAX_FILE_SIZE_BYTES

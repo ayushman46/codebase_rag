@@ -126,6 +126,7 @@ def embed_chunks(
     *,
     initial_batch_size: int | None = None,
     on_batch_size_change: Callable[[int], None] | None = None,
+    on_request: Callable[[], None] | None = None,
 ) -> List[Dict]:
     if not chunks:
         return chunks
@@ -159,6 +160,8 @@ def embed_chunks(
             for c in batch
         ]
         try:
+            if on_request is not None:
+                on_request()
             embeddings = embed_texts(texts_to_embed, input_type="passage")
         except EmbeddingUnavailableError:
             if current_size <= minimum_batch_size:
