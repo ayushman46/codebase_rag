@@ -136,9 +136,23 @@ def embed_chunks(
     # dropping or changing any chunk.
     batch_size = max(1, initial_batch_size or settings.embedding_batch_size)
     minimum_batch_size = min(batch_size, max(1, settings.embedding_min_batch_size))
+    max_batch_characters = max(1, int(settings.embedding_batch_max_characters))
     offset = 0
     while offset < len(chunks):
         current_size = min(batch_size, len(chunks) - offset)
+        # A count-only batch can be unexpectedly large when a repository has
+        # long code chunks. Bound payload characters as well as passage count;
+        # this keeps latency predictable and avoids a provider rejection that
+        # would otherwise cost a full retry before adaptive splitting runs.
+        payload_characters = 0
+        bounded_size = 0
+        for candidate in chunks[offset:offset + current_size]:
+            candidate_size = len(candidate.get("content", "")) + len(candidate.get("file_path", "")) + 18
+            if bounded_size and payload_characters + candidate_size > max_batch_characters:
+                break
+            payload_characters += candidate_size
+            bounded_size += 1
+        current_size = max(1, bounded_size)
         batch = chunks[offset:offset + current_size]
         texts_to_embed = [
             f"File: {c['file_path']}\nContent:\n{c['content']}"

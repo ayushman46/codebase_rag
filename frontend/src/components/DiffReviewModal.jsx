@@ -1,8 +1,89 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { GitPullRequest, GitBranch, Check, ExternalLink, AlertCircle, Loader2, ArrowRight, X, Github } from 'lucide-react';
 import { getGithubStatus, getGithubLoginUrl, getGithubFile, pushGithubPR } from '../api/client';
 
 const EDITOR_MAX_BYTES = 2_000_000;
+const MAX_DIFF_CELLS = 450_000;
+
+const splitDiffLines = (value) => String(value ?? '').replace(/\r\n/g, '\n').split('\n');
+
+const unchangedRows = (oldLines, newLines) => oldLines.map((line, index) => ({
+  type: 'context',
+  oldLine: index + 1,
+  newLine: index + 1,
+  text: line,
+}));
+
+/**
+ * Produce a bounded line diff for the review surface. LCS gives stable,
+ * readable hunks for normal source files. Very large files use a safe block
+ * fallback instead of allocating an O(n*m) matrix in the browser; the server
+ * still validates the exact full-file replacement before a PR is created.
+ */
+const buildLineDiff = (oldValue, newValue) => {
+  const oldLines = splitDiffLines(oldValue);
+  const newLines = splitDiffLines(newValue);
+  if (oldLines.length === newLines.length && oldLines.every((line, index) => line === newLines[index])) {
+    return { rows: unchangedRows(oldLines, newLines), added: 0, removed: 0, truncated: false };
+  }
+  if (oldLines.length * newLines.length > MAX_DIFF_CELLS) {
+    const prefix = [];
+    while (prefix.length < oldLines.length && prefix.length < newLines.length && oldLines[prefix.length] === newLines[prefix.length]) {
+      prefix.push(oldLines[prefix.length]);
+    }
+    const suffix = [];
+    while (
+      suffix.length < oldLines.length - prefix.length &&
+      suffix.length < newLines.length - prefix.length &&
+      oldLines[oldLines.length - suffix.length - 1] === newLines[newLines.length - suffix.length - 1]
+    ) {
+      suffix.unshift(oldLines[oldLines.length - suffix.length - 1]);
+    }
+    const oldMiddle = oldLines.slice(prefix.length, oldLines.length - suffix.length);
+    const newMiddle = newLines.slice(prefix.length, newLines.length - suffix.length);
+    const rows = [];
+    prefix.forEach((text, index) => rows.push({ type: 'context', oldLine: index + 1, newLine: index + 1, text }));
+    oldMiddle.forEach((text, index) => rows.push({ type: 'removed', oldLine: prefix.length + index + 1, newLine: '', text }));
+    newMiddle.forEach((text, index) => rows.push({ type: 'added', oldLine: '', newLine: prefix.length + index + 1, text }));
+    suffix.forEach((text, index) => {
+      const oldLine = oldLines.length - suffix.length + index + 1;
+      const newLine = newLines.length - suffix.length + index + 1;
+      rows.push({ type: 'context', oldLine, newLine, text });
+    });
+    return { rows, added: newMiddle.length, removed: oldMiddle.length, truncated: true };
+  }
+
+  const width = newLines.length + 1;
+  const table = Array.from({ length: oldLines.length + 1 }, () => new Uint32Array(width));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
+        ? table[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+  const rows = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  let added = 0;
+  let removed = 0;
+  while (oldIndex < oldLines.length || newIndex < newLines.length) {
+    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
+      rows.push({ type: 'context', oldLine: oldIndex + 1, newLine: newIndex + 1, text: oldLines[oldIndex] });
+      oldIndex += 1;
+      newIndex += 1;
+    } else if (newIndex < newLines.length && (oldIndex === oldLines.length || table[oldIndex][newIndex + 1] >= table[oldIndex + 1][newIndex])) {
+      rows.push({ type: 'added', oldLine: '', newLine: newIndex + 1, text: newLines[newIndex] });
+      newIndex += 1;
+      added += 1;
+    } else {
+      rows.push({ type: 'removed', oldLine: oldIndex + 1, newLine: '', text: oldLines[oldIndex] });
+      oldIndex += 1;
+      removed += 1;
+    }
+  }
+  return { rows, added, removed, truncated: false };
+};
 
 const applyExactChanges = (content, changes = []) => {
   let next = content;
@@ -55,6 +136,7 @@ const DiffReviewModal = ({
   const [editPaths, setEditPaths] = useState([]);
   const [selectedPath, setSelectedPath] = useState(filePath);
   const [contentByPath, setContentByPath] = useState({});
+  const [originalContentByPath, setOriginalContentByPath] = useState({});
   const [shaByPath, setShaByPath] = useState({});
   const [sizeByPath, setSizeByPath] = useState({});
   const [appliedByPath, setAppliedByPath] = useState({});
@@ -77,6 +159,7 @@ const DiffReviewModal = ({
   const [submitError, setSubmitError] = useState('');
   const [prResult, setPrResult] = useState(null);
   const [idempotencyKey, setIdempotencyKey] = useState('');
+  const [reviewMode, setReviewMode] = useState('diff');
   const loadCurrentFileRef = useRef(null);
   const checkAuthRef = useRef(null);
 
@@ -131,6 +214,7 @@ const DiffReviewModal = ({
       setEditPaths(paths);
       setSelectedPath(paths[0] || filePath);
       setContentByPath({});
+      setOriginalContentByPath({});
       setShaByPath({});
       setSizeByPath({});
       setAppliedByPath({});
@@ -142,6 +226,7 @@ const DiffReviewModal = ({
       setCommitMessage(`Apply suggested changes to ${filePath || 'file'}`);
       setSubmitError('');
       setPrResult(null);
+      setReviewMode('diff');
       setIdempotencyKey(window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`);
       checkAuth();
     }
@@ -207,6 +292,7 @@ const DiffReviewModal = ({
         if (file.changes.length > 0) proposed = applyExactChanges(content, file.changes);
         return {
           path: file.file_path,
+          originalContent: size <= EDITOR_MAX_BYTES ? content : '',
           content: size <= EDITOR_MAX_BYTES ? proposed : '',
           sha: String(data.sha || ''),
           size,
@@ -214,10 +300,12 @@ const DiffReviewModal = ({
         };
       }));
       const contents = Object.fromEntries(loaded.map((item) => [item.path, item.content]));
+      const originals = Object.fromEntries(loaded.map((item) => [item.path, item.originalContent]));
       const shas = Object.fromEntries(loaded.map((item) => [item.path, item.sha]));
       const sizes = Object.fromEntries(loaded.map((item) => [item.path, item.size]));
       const applied = Object.fromEntries(loaded.map((item) => [item.path, item.applied]));
       setContentByPath(contents);
+      setOriginalContentByPath(originals);
       setShaByPath(shas);
       setSizeByPath(sizes);
       setAppliedByPath(applied);
@@ -258,6 +346,11 @@ const DiffReviewModal = ({
     setFileSize(sizeByPath[path] || 0);
     setSuggestionApplied(Boolean(appliedByPath[path]));
   };
+
+  const selectedDiff = useMemo(
+    () => buildLineDiff(originalContentByPath[selectedPath] || '', contentByPath[selectedPath] || ''),
+    [originalContentByPath, contentByPath, selectedPath],
+  );
 
   const handleContentChange = (value) => {
     setNewContent(value);
@@ -491,22 +584,70 @@ const DiffReviewModal = ({
                       onClick={() => selectFile(path)}
                       className={`rounded-lg border px-3 py-1.5 text-xs font-mono transition-colors ${selectedPath === path ? 'border-ember-orange bg-ember-orange/10 text-ember-orange' : 'border-sand text-warm-gray hover:border-ember-orange/50'}`}
                     >
-                      {path}
+                      {path}{appliedByPath[path] ? <span className="ml-1 text-emerald-600" aria-label="changed">●</span> : null}
                     </button>
                   ))}
                 </div>
               )}
               <div id={`github-file-panel-${Math.max(0, editPaths.indexOf(selectedPath))}`} role="tabpanel" aria-labelledby={`github-file-tab-${Math.max(0, editPaths.indexOf(selectedPath))}`} className="flex items-center justify-between">
-                <label htmlFor="github-file-content" className="text-xs font-semibold uppercase tracking-wider text-warm-gray">
+                <span className="text-xs font-semibold uppercase tracking-wider text-warm-gray">
                   File content ({selectedPath})
-                </label>
-                <span className="text-xs text-stone">
-                  {isLoadingFile ? 'Loading current revision…' : fileSize ? `${Math.ceil(fileSize / 1024)} KB · review before push` : 'Connect GitHub to load the current revision'}
                 </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-stone">
+                    {isLoadingFile ? 'Loading current revision…' : fileSize ? `${Math.ceil(fileSize / 1024)} KB · review before push` : 'Connect GitHub to load the current revision'}
+                  </span>
+                  {fileSize <= EDITOR_MAX_BYTES && fileSha && (
+                    <div className="inline-flex rounded-lg border border-sand bg-pure-white p-0.5" role="group" aria-label="Review or edit file">
+                      <button
+                        type="button"
+                        onClick={() => setReviewMode('diff')}
+                        aria-pressed={reviewMode === 'diff'}
+                        className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors ${reviewMode === 'diff' ? 'bg-charcoal text-pure-white' : 'text-warm-gray hover:text-ink-black'}`}
+                      >
+                        Diff
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReviewMode('edit')}
+                        aria-pressed={reviewMode === 'edit'}
+                        className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors ${reviewMode === 'edit' ? 'bg-charcoal text-pure-white' : 'text-warm-gray hover:text-ink-black'}`}
+                      >
+                        Edit
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
               {fileSize > EDITOR_MAX_BYTES ? (
                 <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
                   This file is larger than the safe in browser editor limit of 2 MB. The 50 MB ingestion limit remains available, but large files must be edited directly on GitHub or with a targeted patch.
+                </div>
+              ) : reviewMode === 'diff' && fileSha ? (
+                <div className="overflow-hidden rounded-2xl border border-charcoal bg-deep-charcoal" aria-label={`Line diff for ${selectedPath}`}>
+                  <div className="flex items-center justify-between border-b border-charcoal px-4 py-2 text-[11px] text-stone">
+                    <span><span className="text-emerald-300">+{selectedDiff.added}</span> <span className="text-red-300">−{selectedDiff.removed}</span> {selectedDiff.truncated ? '· large-file fallback' : '· exact line diff'}</span>
+                    <span>old <span className="text-red-300">red</span> · new <span className="text-emerald-300">green</span></span>
+                  </div>
+                  <div className="max-h-[30rem] overflow-auto font-mono text-[11px] leading-relaxed">
+                    {selectedDiff.rows.map((row, index) => {
+                      const tone = row.type === 'removed'
+                        ? 'bg-red-950/70 text-red-100'
+                        : row.type === 'added'
+                          ? 'bg-emerald-950/70 text-emerald-100'
+                          : 'text-stone';
+                      const marker = row.type === 'removed' ? '−' : row.type === 'added' ? '+' : ' ';
+                      return (
+                        <div key={`${row.type}-${row.oldLine}-${row.newLine}-${index}`} className={`grid grid-cols-[3.5rem_3.5rem_1.5rem_minmax(0,1fr)] min-w-[42rem] ${tone}`}>
+                          <span className="select-none border-r border-charcoal/70 px-2 py-1 text-right text-stone/70">{row.oldLine}</span>
+                          <span className="select-none border-r border-charcoal/70 px-2 py-1 text-right text-stone/70">{row.newLine}</span>
+                          <span className="select-none px-2 py-1 text-center font-bold">{marker}</span>
+                          <pre className="m-0 whitespace-pre-wrap break-words px-2 py-1">{row.text || ' '}</pre>
+                        </div>
+                      );
+                    })}
+                    {!selectedDiff.rows.length && <p className="p-4 text-stone">Connect GitHub to load the current revision.</p>}
+                  </div>
                 </div>
               ) : (
                 <textarea

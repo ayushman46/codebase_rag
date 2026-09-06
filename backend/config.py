@@ -42,17 +42,16 @@ class Settings(BaseSettings):
     # Interactive answers fail fast enough to keep the chat responsive. Long
     # embedding jobs retain their separate retry budget below.
     answer_retry_attempts: int = 2
-    # Keep hosted embedding requests deliberately small. Code chunks can be
-    # substantially larger than ordinary chat inputs, and large batches are
-    # more likely to be rejected by a shared hosted endpoint.
-    # Sixteen passages per request reduces provider round trips. The embedder
-    # adaptively halves a rejected payload and never drops a chunk.
-    embedding_batch_size: int = 16
+    # Keep hosted embedding requests bounded by both count and characters.
+    # Larger batches reduce provider round trips; the character ceiling keeps
+    # a single request safe for code-heavy chunks and a 512 MB worker.
+    embedding_batch_size: int = 32
     embedding_min_batch_size: int = 4
+    embedding_batch_max_characters: int = 120_000
     # Aggregate chunks from small files before embedding. This avoids one
     # under-filled provider request per file while keeping peak memory bounded
     # on the 512 MB Render instance.
-    embedding_chunk_buffer_size: int = 64
+    embedding_chunk_buffer_size: int = 128
     # Shared hosted capacity can return a short-lived 503. Five attempts with
     # backoff provide a 30-second recovery window before a job is failed.
     embedding_retry_attempts: int = 5
@@ -66,6 +65,11 @@ class Settings(BaseSettings):
     # provider's request-size limits. The pipeline still checks cancellation
     # between batches.
     chunk_insert_batch_size: int = 250
+    # Two concurrent chunkers improve throughput for ordinary repositories.
+    # Files above the large-file threshold are processed serially so a Render
+    # 512 MB instance never holds several 50 MB source files at once.
+    ingestion_chunk_workers: int = 2
+    ingestion_large_file_serial_bytes: int = 8_000_000
     supabase_url: str = ""
     supabase_key: str = ""
     # Supabase remains the authentication provider. All application data is

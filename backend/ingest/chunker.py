@@ -31,27 +31,23 @@ def extract_symbols(content: str) -> List[str]:
             symbols.append(symbol)
     return symbols[:50]
 
-def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
+def chunk_file_content(content: str, rel_path: str) -> List[Dict]:
+    """Split already-loaded source text into deterministic retrieval chunks.
+
+    Keeping the pure content operation separate lets the ingestion worker run
+    several *bounded* files concurrently without changing chunk boundaries or
+    reading a file more than once inside a worker.
     """
-    Reads a file and splits it into logical chunks using a regex boundary heuristic.
-    Falls back to a recursive line splitter for large chunks or non-code files.
-    """
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-    except Exception:
-        return []
     if not content.strip():
         return []
-        
-    rel_path = os.path.relpath(filepath, repo_path)
-    _, ext = os.path.splitext(filepath)
+
+    _, ext = os.path.splitext(rel_path)
     ext = ext.lower()
     language = ext[1:] if ext else "text"
-    
+
     # splitlines avoids manufacturing a non-existent extra line for a final newline.
     lines = content.splitlines()
-    
+
     # 1. If file is small and not obviously minified/generated, treat as single chunk
     if len(lines) <= 200 and len(content) <= MAX_CHARS_PER_CHUNK:
         return [{
@@ -65,22 +61,22 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
 
     if is_probably_minified(content, lines):
         return split_by_characters(content, rel_path, language)
-        
+
     chunks = []
-    
+
     # 2. Try regex boundary detection
     boundaries = [0]
     for i, line in enumerate(lines):
         if BOUNDARY_REGEX.search(line):
             boundaries.append(i)
-            
+
     boundaries.append(len(lines))
-    
+
     # Process boundaries
     for i in range(len(boundaries) - 1):
         start_line = boundaries[i]
         end_line = boundaries[i+1]
-        
+
         if start_line == end_line:
             continue
 
@@ -100,10 +96,20 @@ def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
                 "language": language,
                 "symbols": extract_symbols(chunk_content),
             })
-            
+
     # Filter empty chunks
-    chunks = [c for c in chunks if c["content"].strip()]
-    return chunks
+    return [c for c in chunks if c["content"].strip()]
+
+
+def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
+    """Read a file and split it using the same deterministic chunking rules."""
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+    except Exception:
+        return []
+    rel_path = os.path.relpath(filepath, repo_path).replace(os.sep, "/")
+    return chunk_file_content(content, rel_path)
 
 def split_by_lines(lines: List[str], offset_line: int, file_path: str, language: str) -> List[Dict]:
     """Splits lines into manageable chunks with overlap and a char ceiling."""

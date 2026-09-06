@@ -44,6 +44,47 @@ async def run_blocking(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+async def iter_chunked_files(file_paths: list[str], repo_path: str):
+    """Yield bounded concurrent chunking results without retaining a repo.
+
+    Chunking is CPU and file-I/O work. The old pipeline awaited every file in
+    sequence, leaving a worker idle while the next file was read. This helper
+    overlaps a small number of ordinary files, but automatically falls back to
+    one worker when any input is large enough to make concurrent full-file
+    buffers unsafe on the 512 MB Render instance. Results may complete out of
+    order; file paths and line ranges remain deterministic within each result.
+    """
+    if not file_paths:
+        return
+    configured_workers = max(1, int(settings.ingestion_chunk_workers))
+    large_threshold = max(1, int(settings.ingestion_large_file_serial_bytes))
+    def is_large(path: str) -> bool:
+        try:
+            return os.path.getsize(path) >= large_threshold
+        except OSError:
+            return False
+
+    has_large_file = any(is_large(path) for path in file_paths)
+    worker_count = 1 if has_large_file else min(configured_workers, len(file_paths))
+
+    async def chunk_one(path: str):
+        return path, await run_blocking(chunk_file, path, repo_path)
+
+    # Batch tasks rather than creating one asyncio task per repository file.
+    # This bounds both task overhead and the number of full file buffers alive.
+    for offset in range(0, len(file_paths), worker_count):
+        tasks = [asyncio.create_task(chunk_one(path)) for path in file_paths[offset:offset + worker_count]]
+        try:
+            for task in asyncio.as_completed(tasks):
+                yield await task
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+
 async def ensure_repo_record(store, github_url: str, user_id: str):
     """Create or queue a repository only for its authenticated owner.
 
@@ -575,9 +616,10 @@ async def run_ingestion_for_repo(
             del embedded_chunks
             del batch
 
-        for file_index, file_path in enumerate(changed_files, start=1):
+        file_index = 0
+        async for file_path, file_chunks in iter_chunked_files(changed_files, repo_path):
+            file_index += 1
             await raise_if_ingestion_cancelled(store, repo_id, claim_token)
-            file_chunks = await run_blocking(chunk_file, file_path, repo_path)
             relative_path = os.path.relpath(file_path, repo_path).replace(os.sep, "/")
             if not file_chunks:
                 continue
