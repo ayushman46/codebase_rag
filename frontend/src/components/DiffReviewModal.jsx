@@ -86,19 +86,39 @@ const buildLineDiff = (oldValue, newValue) => {
 };
 
 const applyExactChanges = (content, changes = []) => {
-  let next = content;
-  for (const change of changes) {
-    const oldText = String(change?.old ?? '');
-    const newText = String(change?.new ?? '');
+  // Python's source reader normalises CRLF while GitHub preserves the blob's
+  // original line endings. Compare in LF form, then restore the file's style
+  // before it is sent back to GitHub; otherwise every Windows file appears
+  // stale even though the generated hunk is correct.
+  const usesCrLf = /\r\n/.test(content);
+  const original = String(content ?? '').replace(/\r\n/g, '\n');
+  let next = original;
+  const matches = changes.map((change) => {
+    const oldText = String(change?.old ?? '').replace(/\r\n/g, '\n');
+    const newText = String(change?.new ?? '').replace(/\r\n/g, '\n');
     if (!oldText) throw new Error('The generated patch contained an empty search hunk.');
-    const first = next.indexOf(oldText);
+    const first = original.indexOf(oldText);
     if (first < 0) throw new Error('The generated patch no longer matches the current GitHub file. Refresh and generate it again.');
-    if (next.indexOf(oldText, first + oldText.length) >= 0) {
+    if (original.indexOf(oldText, first + oldText.length) >= 0) {
       throw new Error('The generated patch matched more than one location. It was not applied automatically.');
     }
-    next = `${next.slice(0, first)}${newText}${next.slice(first + oldText.length)}`;
+    return { first, oldText, newText };
+  });
+  // Apply from the end of the original file backwards. This keeps offsets
+  // stable when a response contains several non-overlapping hunks and avoids
+  // a replacement introducing text that a later hunk accidentally matches.
+  matches.sort((left, right) => right.first - left.first);
+  for (let index = 1; index < matches.length; index += 1) {
+    const previous = matches[index - 1];
+    const current = matches[index];
+    if (current.first + current.oldText.length > previous.first) {
+      throw new Error('The generated patch contains overlapping search hunks. It was not applied automatically.');
+    }
   }
-  return next;
+  matches.forEach(({ first, oldText, newText }) => {
+    next = `${next.slice(0, first)}${newText}${next.slice(first + oldText.length)}`;
+  });
+  return usesCrLf ? next.replace(/\n/g, '\r\n') : next;
 };
 
 const suggestedFiles = (editSuggestion, fallbackPath = '') => {
@@ -283,22 +303,38 @@ const DiffReviewModal = ({
     setIsLoadingFile(true);
     setSubmitError('');
     try {
-      const loaded = await Promise.all(files.map(async (file) => {
-        const res = await getGithubFile(repoName, file.file_path, editTicket);
-        const data = res.data || {};
-        const content = String(data.content || '');
-        const size = Number(data.size || new Blob([content]).size);
-        let proposed = content;
-        if (file.changes.length > 0) proposed = applyExactChanges(content, file.changes);
-        return {
-          path: file.file_path,
-          originalContent: size <= EDITOR_MAX_BYTES ? content : '',
-          content: size <= EDITOR_MAX_BYTES ? proposed : '',
-          sha: String(data.sha || ''),
-          size,
-          applied: proposed !== content,
-        };
+      const settled = await Promise.all(files.map(async (file) => {
+        try {
+          const res = await getGithubFile(repoName, file.file_path, editTicket);
+          const data = res.data || {};
+          const content = String(data.content || '');
+          const size = Number(data.size || new Blob([content]).size);
+          let proposed = content;
+          // The server intentionally omits content above the browser editor
+          // ceiling. Do not try to apply a hunk to that empty sentinel; keep
+          // the SHA and size so the UI can explain the safe next step while
+          // other files in a multi-file proposal remain reviewable.
+          if (file.changes.length > 0 && size <= EDITOR_MAX_BYTES) {
+            proposed = applyExactChanges(content, file.changes);
+          }
+          return {
+            ok: true,
+            path: file.file_path,
+            originalContent: size <= EDITOR_MAX_BYTES ? content : '',
+            content: size <= EDITOR_MAX_BYTES ? proposed : '',
+            sha: String(data.sha || ''),
+            size,
+            applied: proposed !== content,
+          };
+        } catch (error) {
+          return { ok: false, path: file.file_path, error };
+        }
       }));
+      const loaded = settled.filter((item) => item.ok);
+      const failures = settled.filter((item) => !item.ok);
+      if (!loaded.length) {
+        throw failures[0]?.error || new Error('Could not load the current GitHub files for review.');
+      }
       const contents = Object.fromEntries(loaded.map((item) => [item.path, item.content]));
       const originals = Object.fromEntries(loaded.map((item) => [item.path, item.originalContent]));
       const shas = Object.fromEntries(loaded.map((item) => [item.path, item.sha]));
@@ -309,12 +345,18 @@ const DiffReviewModal = ({
       setShaByPath(shas);
       setSizeByPath(sizes);
       setAppliedByPath(applied);
-      const first = files[0].file_path;
+      const first = loaded[0].path;
       setSelectedPath(first);
       setNewContent(contents[first] || '');
       setFileSha(shas[first] || '');
       setFileSize(sizes[first] || 0);
       setSuggestionApplied(Boolean(applied[first]));
+      if (failures.length > 0) {
+        setSubmitError(
+          `Could not load ${failures.map((item) => item.path).join(', ')}. ` +
+          'The available files remain reviewable, but refresh or reconnect GitHub before pushing.',
+        );
+      }
     } catch (err) {
       // ``/github/status`` only tells us that a credential row exists. The
       // first file request is the real token check, so an expired, revoked,

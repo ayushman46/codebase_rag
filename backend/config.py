@@ -153,8 +153,17 @@ class Settings(BaseSettings):
     # Retain enough diverse evidence for accurate multi-file answers without
     # turning each question into an excessively large hosted-model request.
     max_context_characters: int = 40_000
+    # Editing requests need more source than ordinary answers. The retrieval
+    # layer keeps this bounded and prioritises complete target files; the
+    # larger budget prevents a valid hunk from being cut at a chunk boundary.
+    editing_context_characters: int = 120_000
     retrieval_top_k: int = 8
     editing_retrieval_top_k: int = 32
+    # At most this many complete files are handed to the code model. Related
+    # imports/callers are selected only when they are present in the indexed
+    # evidence, so a large repository never becomes a whole-repository prompt.
+    editing_max_files: int = 6
+    editing_max_chunks_per_file: int = 256
     # Dense reranking is restricted to lexical/path candidates so a question
     # never performs a repository-wide vector sort on Turso.
     dense_candidate_limit: int = 256

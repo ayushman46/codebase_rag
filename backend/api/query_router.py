@@ -74,8 +74,14 @@ async def get_conversation_history(store, repo_id: str, user_id: str, limit: int
     return list(reversed(retained))
 
 
-def build_context(chunks: list[dict]) -> str:
-    remaining, sections = settings.max_context_characters, []
+def build_context(chunks: list[dict], *, max_characters: int | None = None) -> str:
+    """Serialize evidence without cutting ordinary answers or edit targets.
+
+    Editing retrieval deliberately expands complete bounded files. Give that
+    workflow its own larger, still finite budget so a replacement hunk is not
+    cut halfway through a chunk, while normal chat keeps its low-latency cap.
+    """
+    remaining, sections = max(1, int(max_characters or settings.max_context_characters)), []
     for chunk in chunks:
         header = (
             f"File: {chunk['file_path']} (L{chunk['start_line']}-L{chunk['end_line']})"
@@ -213,7 +219,10 @@ async def query_repo(req: QueryRequest, current_user=Depends(get_current_user)):
             if not chunks:
                 answer, tool_calls, mode, citations = build_no_evidence_response(), [], "repository_guidance", []
             else:
-                context = build_context(chunks)
+                context = build_context(
+                    chunks,
+                    max_characters=(settings.editing_context_characters if workflow == "editing" else None),
+                )
                 if not context:
                     raise HTTPException(status_code=422, detail="Repository evidence exceeded the configured context limit.")
                 try:

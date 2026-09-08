@@ -848,6 +848,43 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(len(result), len(chunks))
         self.assertTrue(all(chunk["_retrieval_methods"] == ["requested_file"] for chunk in result))
 
+    def test_editing_retrieval_expands_inferred_target_to_complete_file(self):
+        """Natural-language edits must not be limited to two sample chunks."""
+        from retrieval.retriever import retrieve_context
+
+        store = MemoryStore()
+        sampled = {
+            "id": "css-1", "file_path": "src/index.css", "start_line": 1, "end_line": 12,
+            "language": "css", "symbols": [], "content": ":root { --bg: #f5f1ea; }",
+        }
+        complete = [
+            {**sampled, "id": "css-1"},
+            {"id": "css-2", "file_path": "src/index.css", "start_line": 13, "end_line": 24,
+             "language": "css", "symbols": [], "content": "body { background: var(--bg); }"},
+            {"id": "css-3", "file_path": "src/index.css", "start_line": 25, "end_line": 36,
+             "language": "css", "symbols": [], "content": ".dashboard { color: #111; }"},
+        ]
+
+        async def fetch_all(sql, args=None):
+            store.executed.append((sql, args or []))
+            if "ROW_NUMBER() OVER" in sql:
+                return complete
+            if "JOIN hints h ON lower(c.file_path) LIKE h.pattern" in sql:
+                return [sampled | {"matched_hint": "css", "hint_order": 0}]
+            if "chunks_fts" in sql:
+                return [sampled]
+            return []
+
+        store.fetch_all = fetch_all
+        with patch("retrieval.retriever.embed_query", side_effect=EmbeddingUnavailableError("offline")):
+            result = asyncio.run(retrieve_context(
+                store, "repo-1", "Make the dashboard background white", top_k=4, workflow="editing",
+            ))
+
+        self.assertEqual([chunk["file_path"] for chunk in result], ["src/index.css"] * 3)
+        self.assertEqual([chunk["start_line"] for chunk in result], [1, 13, 25])
+        self.assertTrue(all("editing_target_file" in chunk["_retrieval_methods"] for chunk in result))
+
     def test_requested_file_paths_escape_like_wildcards(self):
         from retrieval.retriever import requested_file_chunks
 

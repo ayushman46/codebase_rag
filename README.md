@@ -104,7 +104,7 @@ Progress writes are throttled so Turso is not updated after every provider reque
 
 File selection, hashing, dependency extraction, and chunking are linear in the selected source size. Local dependency lookups use sets rather than repeated repository scans, and line ranges are calculated with one newline index and binary search. Changed files are chunked with a bounded worker pool instead of one file at a time. The worker uses two concurrent chunkers for ordinary files and automatically switches to one for large files, preventing a 512 MB Render instance from retaining several large source buffers at once. Unchanged files skip chunking and embedding entirely. Hosted embedding requests use a 32 passage ceiling and a 160,000 character ceiling, so small files use fewer provider round trips without sending an unbounded payload; rejected payloads are split adaptively. Chunks are persisted in configurable batches of 250 by default, reducing remote database round trips without changing ordering or evidence. Hosted embedding latency remains the dominant variable because it depends on NVIDIA service capacity.
 
-The code editing review is file complete rather than citation excerpt based. Every proposed file is loaded from the current GitHub revision, compared against the generated replacement, and shown in its own tab. The review renders removed lines in red and added lines in green, reports the change counts, and uses a bounded large file fallback instead of freezing the browser. The server still applies exact grounded hunks and verifies each Git blob SHA before creating one atomic commit, so the visual diff never replaces the merge safety checks.
+The code editing review is file complete rather than citation excerpt based. Editing retrieval expands the highest confidence target files beyond the two chunk sample used by normal chat, includes complete bounded file sequences, and adds only resolved callers or imports for issue driven changes. The model receives a separate 120,000 character editing context budget, while the number of files and chunks remains capped. Every proposed file is loaded from the current GitHub revision, compared against the generated replacement, and shown in its own tab. The review renders removed lines in red and added lines in green, reports the change counts, and uses a bounded large file fallback instead of freezing the browser. The server still applies exact grounded hunks and verifies each Git blob SHA before creating one atomic commit, so the visual diff never replaces the merge safety checks.
 
 Ingestion is two phase. Keyword chunks are written first, so the repository becomes searchable before semantic vectors finish. The status panel then reports real semantic progress and accepts questions during background embedding. Passage content hashes reuse vectors from the bounded Turso embedding cache for repositories up to 25 MB; larger indexes stream vectors without keeping a second cache copy, which avoids unnecessary memory pressure. Files above 2 MB are chunked through a bounded producer instead of materialising the whole file, and dependency extraction hashes and scans large files incrementally. Vectors remain packed float32 values in the worker and are converted to compact JSON only at the bounded Turso write boundary. Unchanged files are skipped by the SHA 256 manifest. Refreshes keep the previous searchable version until the replacement is validated, and cancelling a refresh removes only that attempt's rows. A small RSS guard reduces buffers above 350 MB and pauses new provider work above 450 MB to protect the 512 MB Render process. Deterministic onboarding metadata is built after source search is available rather than blocking it.
 
@@ -168,7 +168,7 @@ The chat selector provides bounded modes for different goals.
 
 6. Technical due diligence gives a bounded summary of architecture, dependencies, operational concerns, and evidence gaps.
 
-7. Code editing and PR is the only mode that can generate a change proposal or expose the GitHub review action. It uses NVIDIA Nemotron Super for code generation, with the configured Nemotron Lightning fallback. It asks for exact search and replace hunks across at most eight explicitly evidenced files, checks every hunk against that file's indexed source, and refuses speculative or partial patches. The complete current files are loaded from GitHub before the proposed hunks are applied. A short lived, file set scoped server ticket is required before the file or PR endpoints can be used.
+7. Code editing and PR is the only mode that can generate a change proposal or expose the GitHub review action. It uses NVIDIA Nemotron Super for code generation, with the configured Nemotron Lightning fallback. It asks for exact search and replace hunks across at most eight explicitly evidenced files, checks every hunk against that file's indexed source, and refuses speculative or partial patches. Inferred editing targets are expanded to complete bounded source context so imports, exports, call sites, and tests are not silently omitted. The complete current files are loaded from GitHub before the proposed hunks are applied. A short lived, file set scoped server ticket is required before the file or PR endpoints can be used.
 
 The modes change evidence priorities and answer structure. They do not create facts that are absent from the repository.
 
@@ -180,7 +180,7 @@ The Review and Push PR action is available only inside Code editing and PR mode 
 
 1. The user selects Code editing and PR and asks for a focused change or pastes an issue reference and issue text.
 
-2. The retrieval planner selects the implementation files, tests, callers, and configuration needed for that change. A patch is generated only from exact indexed source hunks.
+2. The retrieval planner ranks implementation files first, then expands the selected files to complete bounded source sequences. Issue driven requests may also include resolved callers or imports. A patch is generated only from exact indexed source hunks.
 
 3. The server validates the patch against the indexed file set and issues a short lived editing ticket scoped to the user, repository, and files.
 
@@ -204,7 +204,7 @@ For local development, use `http://localhost:8000/api/github/callback` and regis
 
 If the review modal says that the GitHub connection expired, check the OAuth popup message first. A token encryption message means `GITHUB_TOKEN_ENCRYPTION_KEY` is missing, shorter than 32 characters, malformed, or different from the key used by the deployment that stored the token. A GitHub authorization message means `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, or `GITHUB_REDIRECT_URI` does not match the GitHub OAuth App. After correcting Render variables, redeploy, hard refresh the browser, and connect GitHub again. The connection is separate from Google sign in, so signing out of Google does not refresh the GitHub token.
 
-For an issue-driven change, select Code editing and PR mode and paste the issue number and full issue text, for example `Issue #1428: ...`. The retrieval plan records the issue reference, keeps a bounded hybrid search across implementation files, tests, callers, and configuration, and carries the issue number into the proposed pull request. The patch still appears only when every exact replacement is grounded in the selected repository evidence; if the available evidence cannot support a complete fix, the system refuses to expose a push action.
+For an issue-driven change, select Code editing and PR mode and paste the issue number and full issue text, for example `Issue #1428: ...`. The retrieval plan records the issue reference, ranks the likely target files, expands them to complete bounded source, and adds only resolved callers or imports that can be verified in the dependency graph. The issue number is carried into the proposed pull request. The patch still appears only when every exact replacement is grounded in the selected repository evidence; if the available evidence cannot support a complete fix, the system refuses to expose a push action.
 
 ## Dependencies
 
@@ -413,7 +413,11 @@ VITE_SUPABASE_ANON_KEY=
 VITE_RAZORPAY_KEY_ID=
 VITE_API_BASE_URL=http://localhost:8000/api
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+MAX_CONTEXT_CHARACTERS=40000
+EDITING_CONTEXT_CHARACTERS=120000
 EDITING_RETRIEVAL_TOP_K=32
+EDITING_MAX_FILES=6
+EDITING_MAX_CHUNKS_PER_FILE=256
 DENSE_CANDIDATE_LIMIT=256
 ANSWER_RETRY_ATTEMPTS=2
 ```

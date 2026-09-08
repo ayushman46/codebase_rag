@@ -115,6 +115,12 @@ services:
         value: "250"
       - key: EDITING_RETRIEVAL_TOP_K
         value: "32"
+      - key: EDITING_CONTEXT_CHARACTERS
+        value: "120000"
+      - key: EDITING_MAX_FILES
+        value: "6"
+      - key: EDITING_MAX_CHUNKS_PER_FILE
+        value: "256"
       - key: DENSE_CANDIDATE_LIMIT
         value: "256"
       - key: ANSWER_RETRY_ATTEMPTS

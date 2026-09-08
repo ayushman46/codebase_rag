@@ -529,6 +529,170 @@ async def requested_files_chunks(store, repo_id: str, file_paths: list[str], lim
     )
 
 
+async def complete_files_chunks(
+    store,
+    repo_id: str,
+    file_paths: list[str],
+    per_file_limit: int,
+) -> list[Dict]:
+    """Fetch a bounded, complete source sequence for each selected file.
+
+    Ordinary retrieval intentionally samples chunks. Code editing cannot: a
+    patch generated from only the first two chunks can miss an import, a
+    caller, or the second half of the requested function. Windowing applies
+    the limit independently per file in one Turso round trip, preserving line
+    order without allowing a large file to starve the other edit targets.
+    """
+    paths = list(dict.fromkeys(str(path).strip() for path in file_paths if str(path).strip()))
+    if not paths:
+        return []
+    placeholders = ",".join("?" for _ in paths)
+    args: list[object] = [repo_id, *paths, max(1, int(per_file_limit))]
+    try:
+        return await store.fetch_all(
+            "WITH ranked AS ("
+            "SELECT id, file_path, start_line, end_line, language, symbols, content, "
+            "ROW_NUMBER() OVER (PARTITION BY file_path ORDER BY start_line, id) AS file_rank "
+            f"FROM chunks WHERE repo_id = ? AND file_path IN ({placeholders})"
+            ") SELECT id, file_path, start_line, end_line, language, symbols, content "
+            "FROM ranked WHERE file_rank <= ? ORDER BY file_path, start_line, id",
+            args,
+        )
+    except Exception as error:
+        # Older SQLite/libSQL deployments may not support window functions.
+        # The compatibility path is deliberately bounded and still returns
+        # the complete prefix for every selected file.
+        logger.warning("Windowed editing retrieval unavailable; using bounded file queries (%s)", type(error).__name__)
+        rows: list[Dict] = []
+        for path in paths:
+            rows.extend(await requested_file_chunks(store, repo_id, path, per_file_limit))
+        return sorted(rows, key=lambda row: (str(row.get("file_path", "")), int(row.get("start_line", 0))))
+
+
+async def dependency_file_paths(store, repo_id: str, target_paths: list[str], limit: int = 8) -> list[str]:
+    """Return local import/caller paths for an editing target.
+
+    The graph is conservative and contains only resolved same-repository
+    edges. Including both directions gives the code model the imports a file
+    uses and the callers that must continue to compile after the change.
+    """
+    paths = list(dict.fromkeys(str(path).strip() for path in target_paths if str(path).strip()))
+    if not paths:
+        return []
+    placeholders = ",".join("?" for _ in paths)
+    rows = await store.fetch_all(
+        "SELECT source_file, target_file FROM repo_dependencies WHERE repo_id = ? AND "
+        f"(source_file IN ({placeholders}) OR target_file IN ({placeholders})) "
+        "ORDER BY source_file, target_file LIMIT ?",
+        [repo_id, *paths, *paths, max(1, int(limit))],
+    )
+    related: list[str] = []
+    for row in rows:
+        for value in (row.get("source_file"), row.get("target_file")):
+            value = str(value or "").strip()
+            if value and value not in paths and value not in related:
+                related.append(value)
+    return related[: max(1, int(limit))]
+
+
+def _editing_candidate_paths(
+    chunks: list[Dict],
+    requested_paths: list[str],
+    max_files: int,
+) -> list[str]:
+    """Rank files, rather than chunks, before expanding editing evidence."""
+    scores: dict[str, float] = {}
+    order: dict[str, int] = {}
+    for rank, chunk in enumerate(chunks):
+        path = str(chunk.get("file_path") or "").strip()
+        if not path or is_overview_file(path):
+            continue
+        order.setdefault(path, rank)
+        score = float(chunk.get("_relevance_score") or 0.0)
+        methods = set(chunk.get("_retrieval_methods") or [])
+        if "workflow_target" in methods:
+            score += 1.0
+        # Earlier ranked chunks and multiple independent matches are useful
+        # signals, but never outweigh an explicitly named target.
+        scores[path] = scores.get(path, 0.0) + score + 1.0 / (rank + 1)
+    explicit = [path for path in requested_paths if path and not is_overview_file(path)]
+    ranked = sorted(scores, key=lambda path: (-scores[path], order[path], path))
+    result: list[str] = []
+    for path in [*explicit, *ranked]:
+        if path not in result:
+            result.append(path)
+        if len(result) >= max(1, int(max_files)):
+            break
+    return result
+
+
+async def expand_editing_evidence(
+    store,
+    repo_id: str,
+    candidate_chunks: list[Dict],
+    requested_paths: list[str],
+    *,
+    issue_request: bool,
+) -> list[Dict]:
+    """Replace sampled editing candidates with complete bounded file context."""
+    if not candidate_chunks and not requested_paths:
+        return []
+    max_files = max(1, int(settings.editing_max_files))
+    # Reserve a couple of slots for resolved callers/imports on issue-driven
+    # edits. Without this reservation the ranked candidates could fill the
+    # entire file budget before the dependency graph was consulted.
+    candidate_limit = max(1, max_files - 2) if issue_request else max_files
+    candidate_limit = max(candidate_limit, len(requested_paths))
+    target_paths = _editing_candidate_paths(candidate_chunks, requested_paths, candidate_limit)
+    if issue_request and target_paths:
+        try:
+            related = await dependency_file_paths(
+                store, repo_id, target_paths[:max_files], limit=max_files * 2,
+            )
+        except Exception as error:
+            logger.warning("Editing dependency retrieval unavailable for %s (%s)", repo_id, type(error).__name__)
+            related = []
+        for path in related:
+            if path not in target_paths and len(target_paths) < max_files:
+                target_paths.append(path)
+    if not target_paths:
+        return candidate_chunks
+    rows = await complete_files_chunks(
+        store, repo_id, target_paths, settings.editing_max_chunks_per_file,
+    )
+    if not rows:
+        return candidate_chunks
+    candidate_by_id = {str(chunk.get("id")): chunk for chunk in candidate_chunks}
+    path_rank = {path: index for index, path in enumerate(target_paths)}
+    expanded: list[Dict] = []
+    for row in sorted(rows, key=lambda item: (path_rank.get(str(item.get("file_path")), max_files), int(item.get("start_line", 0)))):
+        base = dict(candidate_by_id.get(str(row.get("id")), row))
+        base.update({
+            "id": row.get("id"), "file_path": row.get("file_path"),
+            "start_line": row.get("start_line"), "end_line": row.get("end_line"),
+            "language": row.get("language"), "symbols": row.get("symbols") or [],
+            "content": row.get("content") or "",
+        })
+        is_explicit_target = str(row.get("file_path")) in requested_paths
+        methods = list(dict.fromkeys([
+            *(base.get("_retrieval_methods") or []),
+            # Preserve the exact-file method for compatibility and clearer
+            # citations. The additional method is useful only for inferred
+            # candidates that were expanded from sampled evidence.
+            *([] if is_explicit_target else ["editing_target_file"]),
+        ]))
+        reasons = list(dict.fromkeys([
+            *(base.get("_retrieval_reasons") or []),
+            "Complete bounded source for a proposed code edit",
+        ]))
+        if is_explicit_target:
+            reasons.append("Explicit file path requested in the question")
+        base["_retrieval_methods"] = methods
+        base["_retrieval_reasons"] = list(dict.fromkeys(reasons))
+        expanded.append(base)
+    return expanded
+
+
 async def path_hint_chunks(
     store,
     repo_id: str,
@@ -623,6 +787,7 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
     include_overview_files = include_overview or question_requests_overview_files(query, requested_paths)
     evidence_plan["overview_files_allowed"] = include_overview_files
     editing_mode = workflow == "editing"
+    issue_request = bool(evidence_plan.get("issue_reference"))
 
     # A named file is an exact request. Running broad semantic/keyword searches
     # here only adds latency because the final evidence contract already
@@ -632,10 +797,13 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
         # Editing needs the complete bounded set of chunks for the named file
         # so the model can form exact search/replace hunks. Normal questions
         # retain their small citation budget and latency.
-        per_file_limit = settings.editing_retrieval_top_k if editing_mode else top_k
+        per_file_limit = settings.editing_max_chunks_per_file if editing_mode else top_k
         rows = await requested_files_chunks(store, repo_id, requested_paths, per_file_limit)
         if not rows:
             return []
+        actual_paths = list(dict.fromkeys(str(chunk.get("file_path") or "") for chunk in rows if chunk.get("file_path")))
+        if editing_mode and actual_paths:
+            rows = await complete_files_chunks(store, repo_id, actual_paths, settings.editing_max_chunks_per_file)
         requested_chunks = []
         for chunk in sorted(rows, key=lambda item: (item["file_path"], item["start_line"])):
             enriched = dict(chunk)
@@ -644,13 +812,43 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             enriched["_evidence_plan"] = evidence_plan
             enriched["_relevance_score"] = 2.0
             requested_chunks.append(enriched)
-        return requested_chunks[: per_file_limit * len(requested_paths)]
+        if not editing_mode:
+            return requested_chunks[: per_file_limit * len(requested_paths)]
+
+        # An issue body often names the primary file but describes a change
+        # that depends on callers, imports, or tests. Add a small supporting
+        # candidate pass for issue requests; normal explicit-file edits stay
+        # exact-file-only and therefore remain fast and citation-precise.
+        candidates = list(requested_chunks)
+        if issue_request:
+            # The named file is already authoritative. For issue support use
+            # lexical matches from the pasted issue text rather than generic
+            # path-family samples (``src`` or ``components`` would otherwise
+            # pull the first alphabetical files in a large repository).
+            support_results = [await sparse_search(
+                store, repo_id, query, limit=settings.editing_retrieval_top_k, plan=evidence_plan,
+            )]
+            for result in support_results:
+                if isinstance(result, Exception):
+                    continue
+                for chunk in result:
+                    path = str(chunk.get("file_path") or "")
+                    if not path or is_overview_file(path):
+                        continue
+                    enriched = dict(chunk)
+                    enriched["_retrieval_methods"] = ["issue_support"]
+                    enriched["_retrieval_reasons"] = ["Supporting source matched the referenced issue"]
+                    enriched["_evidence_plan"] = evidence_plan
+                    enriched["_relevance_score"] = 1.0
+                    candidates.append(enriched)
+        return await expand_editing_evidence(
+            store, repo_id, candidates, actual_paths or requested_paths, issue_request=issue_request,
+        )
 
     # Issue text often mentions one subsystem while the actual fix also needs
     # tests, configuration, callers, or a dependency. Keep the bounded hybrid
     # retrieval set broad for an explicit issue reference; ordinary targeted
     # questions retain their strict path-family citation contract.
-    issue_request = bool(evidence_plan.get("issue_reference"))
     strict_target = is_strict_target_question(query, requested_paths, include_overview_files) and not issue_request
 
     sparse_task = asyncio.create_task(
@@ -802,6 +1000,15 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             scores[chunk["id"]] = scores.get(chunk["id"], 0) + 0.02
         ranked_chunks = [chunk_map[chunk_id] for chunk_id in sorted(scores, key=scores.get, reverse=True)]
 
+    if editing_mode:
+        # The ordinary final selector intentionally limits each file to two
+        # representative chunks. That is correct for chat citations but would
+        # silently omit most of a file from an edit prompt. Expand the chosen
+        # target files before the final evidence boundary instead.
+        ranked_chunks = await expand_editing_evidence(
+            store, repo_id, ranked_chunks, [], issue_request=issue_request,
+        )
+
     # Enforce the citation boundary once more after every retrieval strategy,
     # including dependency expansion and compatibility-store fallbacks. A
     # targeted implementation question must never inherit an overview file
@@ -843,7 +1050,23 @@ async def retrieve_context(store, repo_id: str, query: str, top_k: int = 8, work
             fallback_by_id.setdefault(chunk["id"], annotate(chunk, "overview", "Repository-wide overview fallback; no direct term match"))
         ranked_chunks = list(fallback_by_id.values())
 
-    final_chunks = select_diverse_chunks(ranked_chunks, top_k)
+    if editing_mode:
+        # Keep the response bounded even when a repository contains a very
+        # large target file. Chunks are ordered by target-file confidence and
+        # line number, so this never mixes arbitrary late-repository files
+        # into the edit context.
+        final_chunks = []
+        budget = max(1, int(settings.editing_context_characters))
+        for chunk in ranked_chunks:
+            content_size = len(str(chunk.get("content") or ""))
+            if final_chunks and content_size + 256 > budget:
+                break
+            final_chunks.append(chunk)
+            budget -= content_size + 256
+            if budget <= 0:
+                break
+    else:
+        final_chunks = select_diverse_chunks(ranked_chunks, top_k)
     for chunk in final_chunks:
         chunk["_relevance_score"] = round(scores.get(chunk["id"], 0.0), 6)
     return final_chunks

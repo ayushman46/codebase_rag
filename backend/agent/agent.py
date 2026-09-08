@@ -45,6 +45,16 @@ Every old value must be copied verbatim from that file's repository evidence,
 including whitespace and punctuation. Make the smallest complete change that
 fixes the requested issue. Do not add dependencies, change unrelated files,
 invent missing code, or return complete replacement files.
+Editing evidence is ordered by target-file confidence and contains complete
+bounded source for the selected files. Read the whole target file before
+choosing a hunk; do not patch only the first matching line when the request
+requires imports, exports, call sites, configuration, or tests. Supporting
+files are included only when the index resolved them or the issue evidence
+matched them. Use them to verify names and interfaces, but include a file in
+the patch only when the requested behavior actually requires changing it.
+Each `old` value must be a contiguous, sufficiently distinctive block from
+the target file. Prefer a function or import block over a one-line token, and
+include all related replacements needed for the stated acceptance criteria.
 If the evidence is insufficient for a safe patch, return a JSON object with an
 empty changes list and explain the limitation in the summary. The server will
 not expose an editor for an empty proposal. Never include Markdown fences or
