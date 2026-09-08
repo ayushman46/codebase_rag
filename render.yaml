@@ -80,9 +80,11 @@ services:
       - key: EMBEDDING_MIN_BATCH_SIZE
         value: "4"
       - key: EMBEDDING_CHUNK_BUFFER_SIZE
-        value: "128"
+        value: "256"
       - key: EMBEDDING_BATCH_MAX_CHARACTERS
-        value: "120000"
+        value: "160000"
+      - key: EMBEDDING_CACHE_MAX_REPOSITORY_BYTES
+        value: "25000000"
       - key: NVIDIA_CALLS_PER_MINUTE
         value: "40"
       - key: QUERY_EMBEDDING_RESERVE_PER_MINUTE
@@ -108,7 +110,7 @@ services:
       - key: MAX_FILE_SIZE_BYTES
         value: "50000000"
       - key: MAX_REPOSITORY_CHUNKS
-        value: "3500"
+        value: "15000"
       - key: CHUNK_INSERT_BATCH_SIZE
         value: "250"
       - key: EDITING_RETRIEVAL_TOP_K

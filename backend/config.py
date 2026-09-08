@@ -52,11 +52,22 @@ class Settings(BaseSettings):
     # a single request safe for code-heavy chunks and a 512 MB worker.
     embedding_batch_size: int = 32
     embedding_min_batch_size: int = 4
-    embedding_batch_max_characters: int = 120_000
+    # Roughly 40k tokens of UTF-8 source at the hosted NIM batch boundary.
+    # The embedder still adapts downward automatically if a catalog endpoint
+    # advertises a smaller request budget.
+    embedding_batch_max_characters: int = 160_000
+    # Caching every 2,048-float vector doubles the temporary local database
+    # footprint for very large repositories. Keep the cache for small and
+    # medium indexes where it materially speeds re-indexing, and stream large
+    # indexes without retaining a second copy of their vectors.
+    embedding_cache_max_repository_bytes: int = 25_000_000
     # Aggregate chunks from small files before embedding. This avoids one
     # under-filled provider request per file while keeping peak memory bounded
     # on the 512 MB Render instance.
-    embedding_chunk_buffer_size: int = 128
+    # 256 chunks amortizes database/progress writes for large repositories.
+    # At the 12k-character chunk ceiling this is still only a few MB of source
+    # text plus one provider batch of vectors, well inside the Render margin.
+    embedding_chunk_buffer_size: int = 256
     # Shared hosted capacity can return a short-lived 503. Five attempts with
     # backoff provide a 30-second recovery window before a job is failed.
     embedding_retry_attempts: int = 5
@@ -109,7 +120,11 @@ class Settings(BaseSettings):
     # limit rather than a provider input limit. Fifty MB covers large source
     # and schema files while the repository-wide limit remains in effect.
     max_file_size_bytes: int = 50_000_000
-    max_repository_chunks: int = 3_500
+    # The byte limit is the primary repository guard. Fifteen thousand
+    # bounded chunks lets a 100 MB source tree complete without the previous
+    # arbitrary 3,500-chunk failure; chunk buffers and vectors are still
+    # released incrementally for the 512 MB Render process.
+    max_repository_chunks: int = 15_000
     # GitHub OAuth & Git Data API integration
     github_client_id: str = ""
     github_client_secret: str = ""

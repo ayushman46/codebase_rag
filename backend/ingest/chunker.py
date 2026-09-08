@@ -1,11 +1,17 @@
 import os
 import re
+from collections.abc import Iterator
 from bisect import bisect_left
 from typing import Dict, List
 
 MAX_LINES_PER_CHUNK = 150
 CHUNK_OVERLAP = 40
 MAX_CHARS_PER_CHUNK = 12000
+# ``chunk_file_content`` intentionally remains the compatibility path for
+# callers that already have a string.  The ingestion worker uses the streaming
+# path for larger files so a 50 MB source file never becomes a second 50 MB
+# string plus a list of all of its chunks in the worker.
+STREAMING_FILE_THRESHOLD = 2_000_000
 
 # Basic boundary patterns for common languages
 BOUNDARY_REGEX = re.compile(
@@ -103,13 +109,105 @@ def chunk_file_content(content: str, rel_path: str) -> List[Dict]:
 
 def chunk_file(filepath: str, repo_path: str) -> List[Dict]:
     """Read a file and split it using the same deterministic chunking rules."""
+    return list(iter_chunk_file(filepath, repo_path))
+
+
+def iter_chunk_file(filepath: str, repo_path: str) -> Iterator[Dict]:
+    """Yield source chunks without retaining an entire large file in memory.
+
+    Small files use the established boundary-aware implementation.  Large
+    files use a bounded line window with overlap; this keeps line ranges and
+    exact source text deterministic while limiting live memory to one chunk.
+    The public ``chunk_file`` function still returns a list for compatibility,
+    whereas the ingestion pipeline consumes this iterator incrementally.
+    """
     try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-    except Exception:
-        return []
+        file_size = os.path.getsize(filepath)
+    except OSError:
+        return
     rel_path = os.path.relpath(filepath, repo_path).replace(os.sep, "/")
-    return chunk_file_content(content, rel_path)
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as handle:
+            if file_size <= STREAMING_FILE_THRESHOLD:
+                content = handle.read()
+                yield from chunk_file_content(content, rel_path)
+                return
+            yield from iter_streaming_chunks(handle, rel_path)
+    except (OSError, UnicodeError):
+        return
+
+
+def iter_streaming_chunks(handle, file_path: str) -> Iterator[Dict]:
+    """Yield fixed, overlapping line windows from an open text file.
+
+    Boundary detection is deliberately skipped for this large-file path: a
+    boundary list and ``splitlines`` would scale with the whole file.  The
+    same 150-line/12k-character ceilings and 40-line overlap retain enough
+    context for retrieval while keeping the producer's allocation bounded.
+    An unusually long line is split by characters rather than allowed to
+    bypass the payload ceiling.
+    """
+    _, ext = os.path.splitext(file_path)
+    language = ext[1:].lower() if ext else "text"
+    window: list[str] = []
+    start_line = 1
+    line_number = 0
+    window_chars = 0
+
+    def emit(lines: list[str], first_line: int) -> Dict | None:
+        if not lines:
+            return None
+        content = "\n".join(lines)
+        if not content.strip():
+            return None
+        return {
+            "file_path": file_path,
+            "start_line": first_line,
+            "end_line": first_line + len(lines) - 1,
+            "content": content,
+            "language": language,
+            "symbols": extract_symbols(content),
+        }
+
+    for raw_line in handle:
+        line_number += 1
+        line = raw_line.rstrip("\r\n")
+        # A generated/minified source file can contain a single very large
+        # line. Flush ordinary content first, then split that line safely.
+        if len(line) > MAX_CHARS_PER_CHUNK:
+            if window:
+                item = emit(window, start_line)
+                if item:
+                    yield item
+                window = window[-CHUNK_OVERLAP:]
+                start_line = line_number - len(window)
+                window_chars = sum(len(value) for value in window)
+            for offset in range(0, len(line), MAX_CHARS_PER_CHUNK - 1500):
+                fragment = line[offset:offset + MAX_CHARS_PER_CHUNK]
+                item = emit([fragment], line_number)
+                if item:
+                    yield item
+            # The long line has been emitted in full. Do not emit the prior
+            # overlap again at EOF or prepend it to the next normal window.
+            window = []
+            start_line = line_number + 1
+            window_chars = 0
+            continue
+
+        candidate_chars = window_chars + len(line) + (1 if window else 0)
+        if window and (len(window) >= MAX_LINES_PER_CHUNK or candidate_chars > MAX_CHARS_PER_CHUNK):
+            item = emit(window, start_line)
+            if item:
+                yield item
+            window = window[-CHUNK_OVERLAP:]
+            start_line = line_number - len(window)
+            window_chars = sum(len(value) for value in window)
+        window.append(line)
+        window_chars += len(line) + (1 if len(window) > 1 else 0)
+
+    item = emit(window, start_line)
+    if item:
+        yield item
 
 def split_by_lines(lines: List[str], offset_line: int, file_path: str, language: str) -> List[Dict]:
     """Splits lines into manageable chunks with overlap and a char ceiling."""

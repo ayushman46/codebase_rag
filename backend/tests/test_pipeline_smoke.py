@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from ingest.chunker import chunk_file, extract_symbols
+from ingest.chunker import chunk_file, extract_symbols, iter_chunk_file
 from ingest.cloner import RepositoryValidationError, get_file_selection_report, get_files_to_process, normalize_github_url
 from ingest.embedder import EMBEDDING_DIMENSION, EmbeddingUnavailableError, embed_chunks
 
@@ -205,14 +205,92 @@ class BackendSmokeTests(unittest.TestCase):
         self.assertEqual(chunks[0]["symbols"], ["Login", "handle_login"])
         self.assertEqual(extract_symbols("const signIn = async () => {}"), ["signIn"])
 
+    def test_large_file_chunking_streams_bounded_windows(self):
+        """A file above the streaming threshold never needs a whole-file list."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file_path = root / "large.py"
+            # Keep this just above the production streaming threshold while
+            # making line ranges and overlap easy to assert.
+            file_path.write_text(("value = 1\n" * 240_000), encoding="utf-8")
+            chunks = list(iter_chunk_file(str(file_path), str(root)))
+        self.assertGreater(len(chunks), 10)
+        self.assertEqual(chunks[0]["start_line"], 1)
+        self.assertTrue(all(len(chunk["content"]) <= 12_000 for chunk in chunks))
+        self.assertTrue(all(chunk["start_line"] <= chunk["end_line"] for chunk in chunks))
+        self.assertGreater(chunks[-1]["end_line"], 200_000)
+
+    def test_large_file_pipeline_yields_one_chunk_at_a_time(self):
+        from ingest.pipeline import iter_chunked_files
+
+        async def collect(path, root):
+            result = []
+            async for emitted_path, emitted_chunks in iter_chunked_files([path], root):
+                result.append((emitted_path, emitted_chunks))
+            return result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file_path = root / "large.py"
+            file_path.write_text(("value = 1\n" * 240_000), encoding="utf-8")
+            emitted = asyncio.run(collect(str(file_path), str(root)))
+        self.assertGreater(len(emitted), 10)
+        self.assertTrue(all(len(chunks) == 1 for _, chunks in emitted))
+        self.assertTrue(all(path == str(file_path) for path, _ in emitted))
+
+    def test_large_file_stream_cancels_without_leaking_a_producer_thread(self):
+        from ingest.pipeline import iter_chunked_files
+
+        async def cancel_consumer(path, root):
+            async def consume():
+                async for _path, _chunks in iter_chunked_files([path], root):
+                    await asyncio.sleep(0)
+
+            task = asyncio.create_task(consume())
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file_path = root / "large.py"
+            file_path.write_text(("value = 1\n" * 240_000), encoding="utf-8")
+            asyncio.run(cancel_consumer(str(file_path), str(root)))
+
     def test_embed_chunks_uses_hosted_nvidia_embeddings(self):
+        from array import array
+
         chunks = [{"file_path": "src/app.py", "content": "def hello(): pass", "start_line": 1, "end_line": 1, "language": "py"}]
         fake_client = MagicMock()
         fake_client.embeddings.create.return_value = SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.0] * EMBEDDING_DIMENSION)])
         with patch("ingest.embedder.get_embedding_client", return_value=fake_client):
             embedded = embed_chunks(chunks)
         self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
+        self.assertIsInstance(embedded[0]["embedding"], array)
         self.assertEqual(fake_client.embeddings.create.call_args.kwargs["extra_body"]["input_type"], "passage")
+
+    def test_database_encodes_packed_vectors_at_write_boundary(self):
+        from array import array
+        from database import TursoStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TursoStore(f"file:{Path(tmp) / 'test.db'}", "local-test-token")
+            captured = []
+
+            async def capture(statements):
+                captured.extend(statements)
+
+            async def run():
+                with patch.object(store, "batch", new=capture):
+                    await store.update_chunk_embeddings([{
+                        "id": "chunk-1", "repo_id": "repo-1", "embedding": array("f", [0.25, 0.5]),
+                    }])
+                await store.close()
+
+            asyncio.run(run())
+
+        self.assertEqual(captured[0].args[0], "[0.25,0.5]")
 
     def test_embed_chunks_splits_only_a_rejected_batch_without_dropping_chunks(self):
         from config import settings
@@ -261,6 +339,90 @@ class BackendSmokeTests(unittest.TestCase):
 
         self.assertEqual(request_sizes, [16, 16, 1])
         self.assertEqual(len(embedded), len(chunks))
+
+    def test_embed_repository_chunks_records_provider_calls_without_crashing(self):
+        from ingest.pipeline import embed_repository_chunks
+
+        chunks = [{
+            "id": "chunk-1", "repo_id": "repo-1", "file_path": "src/app.py",
+            "start_line": 1, "end_line": 1, "language": "py", "symbols": [],
+            "content": "print('ok')",
+        }]
+        metrics = {"embedding_requests": 0}
+
+        def fake_embed(batch, *, initial_batch_size=None, on_batch_size_change=None, on_request=None):
+            if on_request:
+                on_request()
+            for chunk in batch:
+                chunk["embedding"] = [0.0] * EMBEDDING_DIMENSION
+            return batch
+
+        with patch("ingest.pipeline.embed_chunks", side_effect=fake_embed):
+            embedded = asyncio.run(embed_repository_chunks(
+                MemoryStore(), "repo-1", chunks, metrics=metrics,
+            ))
+
+        self.assertEqual(metrics["embedding_requests"], 1)
+        self.assertEqual(len(embedded[0]["embedding"]), EMBEDDING_DIMENSION)
+
+    def test_changed_file_replacement_preserves_current_job_version(self):
+        from ingest.pipeline import replace_changed_file_chunks
+        from database import TursoStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TursoStore(f"file:{Path(tmp) / 'test.db'}", "local-test-token")
+
+            async def run():
+                await store.execute(
+                    "CREATE TABLE repos (id TEXT PRIMARY KEY)"
+                )
+                await store.execute(
+                    "CREATE TABLE chunks (id TEXT PRIMARY KEY, repo_id TEXT, file_path TEXT)"
+                )
+                await store.execute("INSERT INTO repos VALUES (?)", ["repo-1"])
+                await store.execute(
+                    "INSERT INTO chunks VALUES (?, ?, ?)", ["old-1", "repo-1", "src/app.py"]
+                )
+                await store.execute(
+                    "INSERT INTO chunks VALUES (?, ?, ?)", ["job-1-new", "repo-1", "src/app.py"]
+                )
+                await replace_changed_file_chunks(
+                    store, "repo-1", {"src/app.py"}, set(), preserve_id_prefix="job-1-"
+                )
+                rows = await store.fetch_all(
+                    "SELECT id FROM chunks WHERE repo_id = ? ORDER BY id", ["repo-1"]
+                )
+                await store.close()
+                return rows
+
+            rows = asyncio.run(run())
+
+        self.assertEqual(rows, [{"id": "job-1-new"}])
+
+    def test_cancelled_refresh_keeps_previous_searchable_index(self):
+        from ingest.pipeline import IngestionCancelledError, run_ingestion_for_repo
+
+        store = MemoryStore()
+
+        async def fetch_one(sql, args=None):
+            store.executed.append((sql, args or []))
+            if "COUNT(*) AS count" in sql:
+                return {"count": 3}
+            if "COUNT(*) AS total" in sql:
+                return {"total": 3, "embedded": 3}
+            if "SELECT status" in sql:
+                return {"status": "ready"}
+            return {"rows_affected": 1}
+
+        store.fetch_one = fetch_one
+        with patch("ingest.pipeline.clone_repo_shallow", side_effect=IngestionCancelledError("stop")):
+            result = asyncio.run(run_ingestion_for_repo(
+                store, "https://github.com/octocat/Hello-World", "user-1", repo_id="repo-1",
+            ))
+
+        self.assertFalse(result)
+        self.assertTrue(any("status = ?" in sql and "ready" in args for sql, args in store.executed if args))
+        self.assertFalse(any(sql == "DELETE FROM chunks WHERE repo_id = ?" for sql, _ in store.executed))
 
     def test_ensure_repo_record_queues_failed_repository_without_erasing_old_index(self):
         from ingest.pipeline import ensure_repo_record

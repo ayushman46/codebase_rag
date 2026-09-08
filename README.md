@@ -86,7 +86,7 @@ Every selected file receives a SHA 256 content hash and a byte size. During re i
 
 The chunker reads a source file and preserves its relative path, language, symbols, starting line, ending line, and content. It uses declaration boundaries where possible and bounded line or character windows for large files. Chunk overlap helps preserve context across a boundary.
 
-The current safety settings allow a maximum of 150 lines per line based chunk window, a character ceiling of 12,000 characters per chunk, and a maximum of 3,500 chunks per repository. The worker uses a bounded pool for ordinary changed files and automatically serializes large files, then releases vectors after each bounded insert batch, keeping peak memory suitable for a 512 MB Render instance. The default repository limit is 100 MB and the default per file limit is 50 MB.
+The current safety settings allow a maximum of 150 lines per line based chunk window, a character ceiling of 12,000 characters per chunk, and a maximum of 15,000 chunks per repository. The worker uses a bounded pool for ordinary changed files and automatically serializes large files, then releases vectors after each bounded insert batch, keeping peak memory suitable for a 512 MB Render instance. The default repository limit is 100 MB and the default per file limit is 50 MB. The byte limit remains the primary guard; the higher chunk ceiling prevents dense but valid source trees from failing at the previous arbitrary 3,500 chunk threshold.
 
 ### Dependency evidence
 
@@ -94,7 +94,7 @@ The dependency pass recognizes common import and include forms and resolves them
 
 ### Embeddings
 
-The default embedding model is NVIDIA Nemotron 3 Embed 1B. It produces native 2,048 dimensional float vectors for the configured database schema. The worker sends passage inputs in bounded batches. It starts with up to 32 passages and 120,000 characters per request and reduces the batch to four if the provider rejects a payload. Every chunk must still receive a vector or be retained for keyword retrieval when the provider is unavailable.
+The default embedding model is NVIDIA Nemotron 3 Embed 1B. It produces native 2,048 dimensional float vectors for the configured database schema. The worker sends passage inputs in bounded batches. It starts with up to 32 passages and 160,000 characters per request and reduces the batch to four or less if the provider rejects a payload. Every chunk must still receive a vector or be retained for keyword retrieval when the provider is unavailable.
 
 The application keeps a request budget for interactive questions while indexing. The default application ceiling is 40 embedding calls per minute, with eight calls reserved for query embeddings. Set `NVIDIA_CALLS_PER_MINUTE` to the exact value shown for your NVIDIA API key; this setting throttles our worker and cannot increase NVIDIA's account quota. NVIDIA may assign a different limit per model and under concurrent load.
 
@@ -102,11 +102,11 @@ Progress writes are throttled so Turso is not updated after every provider reque
 
 ### Ingestion performance
 
-File selection, hashing, dependency extraction, and chunking are linear in the selected source size. Local dependency lookups use sets rather than repeated repository scans, and line ranges are calculated with one newline index and binary search. Changed files are chunked with a bounded worker pool instead of one file at a time. The worker uses two concurrent chunkers for ordinary files and automatically switches to one for large files, preventing a 512 MB Render instance from retaining several large source buffers at once. Unchanged files skip chunking and embedding entirely. Hosted embedding requests use a 32 passage ceiling and a 120,000 character ceiling, so small files use fewer provider round trips without sending an unbounded payload. Chunks are persisted in configurable batches of 250 by default, reducing remote database round trips without changing ordering or evidence. Hosted embedding latency remains the dominant variable because it depends on NVIDIA service capacity.
+File selection, hashing, dependency extraction, and chunking are linear in the selected source size. Local dependency lookups use sets rather than repeated repository scans, and line ranges are calculated with one newline index and binary search. Changed files are chunked with a bounded worker pool instead of one file at a time. The worker uses two concurrent chunkers for ordinary files and automatically switches to one for large files, preventing a 512 MB Render instance from retaining several large source buffers at once. Unchanged files skip chunking and embedding entirely. Hosted embedding requests use a 32 passage ceiling and a 160,000 character ceiling, so small files use fewer provider round trips without sending an unbounded payload; rejected payloads are split adaptively. Chunks are persisted in configurable batches of 250 by default, reducing remote database round trips without changing ordering or evidence. Hosted embedding latency remains the dominant variable because it depends on NVIDIA service capacity.
 
 The code editing review is file complete rather than citation excerpt based. Every proposed file is loaded from the current GitHub revision, compared against the generated replacement, and shown in its own tab. The review renders removed lines in red and added lines in green, reports the change counts, and uses a bounded large file fallback instead of freezing the browser. The server still applies exact grounded hunks and verifies each Git blob SHA before creating one atomic commit, so the visual diff never replaces the merge safety checks.
 
-Ingestion is two phase. Keyword chunks are written first, so the repository becomes searchable before semantic vectors finish. The status panel then reports real semantic progress and accepts questions during background embedding. Passage content hashes reuse vectors from the bounded Turso embedding cache, while unchanged files are skipped by the SHA 256 manifest. A small RSS guard reduces buffers above 350 MB and pauses new provider work above 450 MB to protect the 512 MB Render process. Deterministic onboarding metadata is built after source search is available rather than blocking it.
+Ingestion is two phase. Keyword chunks are written first, so the repository becomes searchable before semantic vectors finish. The status panel then reports real semantic progress and accepts questions during background embedding. Passage content hashes reuse vectors from the bounded Turso embedding cache for repositories up to 25 MB; larger indexes stream vectors without keeping a second cache copy, which avoids unnecessary memory pressure. Files above 2 MB are chunked through a bounded producer instead of materialising the whole file, and dependency extraction hashes and scans large files incrementally. Vectors remain packed float32 values in the worker and are converted to compact JSON only at the bounded Turso write boundary. Unchanged files are skipped by the SHA 256 manifest. Refreshes keep the previous searchable version until the replacement is validated, and cancelling a refresh removes only that attempt's rows. A small RSS guard reduces buffers above 350 MB and pauses new provider work above 450 MB to protect the 512 MB Render process. Deterministic onboarding metadata is built after source search is available rather than blocking it.
 
 ### Turso persistence
 
@@ -136,7 +136,7 @@ The defaults are intentionally finite so one user cannot exhaust the worker or d
 
 3. Maximum size of one selected source file: 50 MB.
 
-4. Maximum chunks in one repository: 3,500.
+4. Maximum chunks in one repository: 15,000.
 
 5. Explorer indexed source quota: 200 MB across the account.
 
@@ -362,8 +362,8 @@ EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 EMBEDDING_DIMENSION=2048
 EMBEDDING_BATCH_SIZE=32
 EMBEDDING_MIN_BATCH_SIZE=4
-EMBEDDING_BATCH_MAX_CHARACTERS=120000
-EMBEDDING_CHUNK_BUFFER_SIZE=128
+EMBEDDING_BATCH_MAX_CHARACTERS=160000
+EMBEDDING_CHUNK_BUFFER_SIZE=256
 NVIDIA_CALLS_PER_MINUTE=40
 QUERY_EMBEDDING_RESERVE_PER_MINUTE=8
 EMBEDDING_RETRY_ATTEMPTS=5
@@ -390,7 +390,7 @@ FREE_CODEBASE_BYTES=200000000
 TEAM_CODEBASE_BYTES=800000000
 MAX_REPOSITORY_BYTES=100000000
 MAX_FILE_SIZE_BYTES=50000000
-MAX_REPOSITORY_CHUNKS=3500
+MAX_REPOSITORY_CHUNKS=15000
 
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=

@@ -80,8 +80,43 @@ def _scan_dependency_edges(content: str, source_path: str, known_files: set[str]
             })
 
 
+def _scan_dependency_edges_lines(lines, source_path: str, known_files: set[str], edges: list[dict], seen: set[tuple[str, str, int]]) -> None:
+    """Scan a text iterator without materialising a large source file.
+
+    Dependency extraction is deliberately conservative and line-oriented.
+    All supported import forms are already anchored to a source line (or use
+    a single-line ``require`` expression), so retaining the complete decoded
+    file and a newline-offset array provides no accuracy benefit while adding
+    tens of megabytes of peak RSS for large files.
+    """
+    for line_number, line in enumerate(lines, 1):
+        for pattern in IMPORT_PATTERNS:
+            match = pattern.search(line)
+            if not match:
+                continue
+            target_path = _resolve_import(match.group(1), source_path, known_files)
+            if not target_path or target_path == source_path:
+                continue
+            key = (source_path, target_path, line_number)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append({
+                "source_file": source_path,
+                "target_file": target_path,
+                "import_name": match.group(1),
+                "line_number": line_number,
+            })
+
+
 def build_manifest_and_dependency_manifest(files: list[str], repo_path: str) -> tuple[dict[str, dict[str, int | str]], list[dict]]:
-    """Hash files and resolve local imports in one bounded read pass."""
+    """Hash files and resolve local imports with bounded memory.
+
+    Hashing uses raw bytes so incremental re-indexing remains exact. A second
+    text pass extracts local imports one line at a time; this avoids keeping a
+    50 MB decoded string, ``splitlines`` list, and newline-offset array alive
+    during the manifest stage.
+    """
     known_files = {_normalise(os.path.relpath(path, repo_path)) for path in files}
     manifest: dict[str, dict[str, int | str]] = {}
     edges: list[dict] = []
@@ -89,12 +124,15 @@ def build_manifest_and_dependency_manifest(files: list[str], repo_path: str) -> 
     for file_path in files:
         source_path = _normalise(os.path.relpath(file_path, repo_path))
         try:
+            digest = hashlib.sha256()
             with open(file_path, "rb") as handle:
-                raw_content = handle.read()
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
+                _scan_dependency_edges_lines(handle, source_path, known_files, edges, seen)
         except OSError:
             continue
-        manifest[source_path] = {"content_hash": hashlib.sha256(raw_content).hexdigest(), "byte_size": len(raw_content)}
-        _scan_dependency_edges(raw_content.decode("utf-8", errors="ignore"), source_path, known_files, edges, seen)
+        manifest[source_path] = {"content_hash": digest.hexdigest(), "byte_size": os.path.getsize(file_path)}
     return manifest, sorted(edges, key=lambda edge: (edge["source_file"], edge["line_number"], edge["target_file"]))
 
 

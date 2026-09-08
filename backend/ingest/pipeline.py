@@ -6,13 +6,16 @@ import hashlib
 import json
 import os
 import logging
+import threading
 import time
+from array import array
 from datetime import UTC, datetime, timedelta
+from queue import Empty, Full, Queue
 from uuid import uuid4
 
 from config import settings
 from database import Statement, assert_turso_schema, explain_database_error, get_turso_store
-from ingest.chunker import chunk_file
+from ingest.chunker import STREAMING_FILE_THRESHOLD, chunk_file, iter_chunk_file
 from ingest.cloner import (
     cleanup_repo,
     clone_repo_shallow,
@@ -70,7 +73,7 @@ async def update_index_state(store, repo_id: str, *, phase: str, keyword_files: 
     )
 
 
-async def publish_index_progress(store, repo_id: str, *, keyword_files: int = 0,
+async def publish_index_progress(store, repo_id: str, *, keyword_files: int | None = None,
                                  embedding_status: str | None = None, allow_ready: bool = False) -> tuple[int, int]:
     """Compute real semantic progress from persisted rows, never a fake timer."""
     totals = await store.fetch_one(
@@ -136,7 +139,11 @@ async def iter_chunked_files(file_paths: list[str], repo_path: str):
     if not file_paths:
         return
     configured_workers = max(1, int(settings.ingestion_chunk_workers))
-    large_threshold = max(1, int(settings.ingestion_large_file_serial_bytes))
+    # Keep the scheduler's serial/streaming decision aligned with the chunker
+    # threshold. A configured 8 MB serial threshold must not accidentally load
+    # a 3 MB file into a complete chunk list when the chunker has already
+    # switched to its bounded streaming implementation at 2 MB.
+    large_threshold = max(1, min(int(settings.ingestion_large_file_serial_bytes), STREAMING_FILE_THRESHOLD))
     def is_large(path: str) -> bool:
         try:
             return os.path.getsize(path) >= large_threshold
@@ -145,6 +152,73 @@ async def iter_chunked_files(file_paths: list[str], repo_path: str):
 
     has_large_file = any(is_large(path) for path in file_paths)
     worker_count = 1 if has_large_file else min(configured_workers, len(file_paths))
+
+    if has_large_file:
+        # A large source file is streamed through a tiny asynchronous queue.
+        # ``run_blocking(list(...))`` would retain every chunk for a 50 MB
+        # file while the database and embedding vectors are also resident.
+        # The producer thread owns the generator and blocks when the queue is
+        # full, keeping the worker's live source allocation bounded.
+        async def stream_one(path: str):
+            # A stdlib queue is safe to write from the producer thread. The
+            # previous asyncio.Queue bridge could leave that thread blocked in
+            # ``run_coroutine_threadsafe(...).result()`` when cancellation
+            # happened during a memory guard or a client disconnect.
+            queue: Queue[tuple[str, object]] = Queue(maxsize=2)
+            sentinel = object()
+            stopped = threading.Event()
+
+            def put_item(item: tuple[str, object]) -> None:
+                while not stopped.is_set():
+                    try:
+                        queue.put(item, timeout=0.1)
+                        return
+                    except Full:
+                        continue
+
+            def produce() -> None:
+                error: BaseException | None = None
+                try:
+                    for chunk in iter_chunk_file(path, repo_path):
+                        if stopped.is_set():
+                            break
+                        put_item(("chunk", chunk))
+                except BaseException as caught:
+                    error = caught
+                finally:
+                    put_item(("done", error or sentinel))
+
+            producer = asyncio.create_task(run_blocking(produce))
+
+            def get_item() -> tuple[str, object] | None:
+                try:
+                    return queue.get(timeout=0.25)
+                except Empty:
+                    return None
+
+            try:
+                while True:
+                    item = await run_blocking(get_item)
+                    if item is None:
+                        continue
+                    kind, value = item
+                    if kind == "done":
+                        if value is not sentinel:
+                            raise value  # type: ignore[misc]
+                        break
+                    yield value
+                await producer
+            except BaseException:
+                stopped.set()
+                if not producer.done():
+                    producer.cancel()
+                await asyncio.gather(producer, return_exceptions=True)
+                raise
+
+        for path in file_paths:
+            async for chunk in stream_one(path):
+                yield path, [chunk]
+        return
 
     async def chunk_one(path: str):
         return path, await run_blocking(chunk_file, path, repo_path)
@@ -316,6 +390,8 @@ async def embed_repository_chunks(
     *,
     progress_offset: int = 0,
     progress_total: int | None = None,
+    metrics: dict | None = None,
+    cache_enabled: bool = True,
 ):
     """Embed in cancellable batches and publish meaningful UI progress."""
     embedded_chunks: list[dict] = []
@@ -342,14 +418,14 @@ async def embed_repository_chunks(
     # current buffer; no repository-wide embedding map is retained in RAM.
     for chunk in chunks:
         chunk.setdefault("content_hash", hashlib.sha256(str(chunk.get("content") or "").encode("utf-8")).hexdigest())
-    cache_reader = getattr(store, "get_embedding_cache", None)
+    cache_reader = getattr(store, "get_embedding_cache", None) if cache_enabled else None
     cached = await cache_reader([chunk["content_hash"] for chunk in chunks]) if cache_reader else {}
     cache_hits = 0
     pending_by_hash: dict[str, dict] = {}
     for chunk in chunks:
         vector = cached.get(chunk["content_hash"])
         if vector is not None:
-            chunk["embedding"] = vector
+            chunk["embedding"] = array("f", vector)
             chunk["_embedding_cache_hit"] = True
             cache_hits += 1
         else:
@@ -364,6 +440,12 @@ async def embed_repository_chunks(
 
     if progress_offset == 0:
         await report_progress(0)
+
+    def record_embedding_request() -> None:
+        """Record provider calls without coupling this helper to one job."""
+        if metrics is not None:
+            metrics["embedding_requests"] = int(metrics.get("embedding_requests", 0)) + 1
+
     offset = 0
     batch_number = 0
     while offset < len(pending):
@@ -378,7 +460,7 @@ async def embed_repository_chunks(
             batch,
             initial_batch_size=current_size,
             on_batch_size_change=lambda value: observed_batch_size.__setitem__(0, value),
-            on_request=lambda: metrics.__setitem__("embedding_requests", metrics["embedding_requests"] + 1),
+            on_request=record_embedding_request,
         )
         offset += current_size
         completed = sum(1 for item in chunks if item.get("embedding") is not None)
@@ -409,7 +491,7 @@ async def embed_repository_chunks(
         if chunk.get("embedding") is None and chunk["content_hash"] in vectors_by_hash:
             chunk["embedding"] = vectors_by_hash[chunk["content_hash"]]
     embedded_chunks = list(chunks)
-    cache_writer = getattr(store, "save_embedding_cache", None)
+    cache_writer = getattr(store, "save_embedding_cache", None) if cache_enabled else None
     if cache_writer:
         cache_records = {}
         for chunk in embedded_chunks:
@@ -527,18 +609,34 @@ def build_file_manifest(files: list[str], repo_path: str) -> dict[str, dict[str,
     return manifest
 
 
-async def replace_changed_file_chunks(store, repo_id: str, changed_paths: set[str], removed_paths: set[str]) -> None:
-    """Remove only stale chunks before new versions are inserted."""
-    stale_paths = sorted(changed_paths | removed_paths)
-    if not stale_paths:
-        return
-    placeholders = ", ".join("?" for _ in stale_paths)
-    await store.execute(
-        f"DELETE FROM chunks WHERE repo_id = ? AND file_path IN ({placeholders})",
-        [repo_id, *stale_paths],
-    )
+async def replace_changed_file_chunks(
+    store,
+    repo_id: str,
+    changed_paths: set[str],
+    removed_paths: set[str],
+    preserve_id_prefix: str | None = None,
+) -> None:
+    """Remove stale chunks while preserving the current ingestion version.
+
+    Re-indexes keep the old rows until the new rows have been completely
+    chunked and embedded. New rows carry a job-scoped id prefix, so the final
+    cleanup can remove only the old version. This keeps a failed re-index from
+    destroying a previously searchable repository.
+    """
+    if changed_paths:
+        placeholders = ", ".join("?" for _ in changed_paths)
+        predicate = f"repo_id = ? AND file_path IN ({placeholders})"
+        args: list[object] = [repo_id, *sorted(changed_paths)]
+        if preserve_id_prefix:
+            predicate += " AND id NOT LIKE ?"
+            args.append(f"{preserve_id_prefix}%")
+        await store.execute(f"DELETE FROM chunks WHERE {predicate}", args)
     if removed_paths:
         placeholders = ", ".join("?" for _ in removed_paths)
+        await store.execute(
+            f"DELETE FROM chunks WHERE repo_id = ? AND file_path IN ({placeholders})",
+            [repo_id, *sorted(removed_paths)],
+        )
         await store.execute(
             f"DELETE FROM repo_files WHERE repo_id = ? AND file_path IN ({placeholders})",
             [repo_id, *sorted(removed_paths)],
@@ -660,6 +758,12 @@ async def run_ingestion_for_repo(
     job_id: str | None = None, claim_token: str | None = None,
 ):
     repo_path: str | None = None
+    # Track the version that existed before this run. Cancellation of a
+    # refresh must not erase a healthy searchable index; only the fresh,
+    # job-scoped rows are disposable until the swap completes.
+    preexisting_chunk_count = 0
+    chunk_id_prefix: str | None = None
+    replacement_swapped = False
     started_at = time.perf_counter()
     metrics = {
         "clone_ms": 0, "scan_ms": 0, "manifest_ms": 0, "chunk_ms": 0,
@@ -674,6 +778,7 @@ async def run_ingestion_for_repo(
         canonical_url = normalize_github_url(github_url)
         if repo_id is None:
             repo_id, _ = await ensure_repo_record(store, canonical_url, user_id)
+        preexisting_chunk_count = await get_repo_chunk_count(store, repo_id)
         await raise_if_ingestion_cancelled(store, repo_id, claim_token)
         await heartbeat_job(store, job_id, claim_token)
         # Keep the previous ready index available while a fresh clone is being
@@ -730,7 +835,27 @@ async def run_ingestion_for_repo(
             if previous_manifest.get(path) != metadata["content_hash"]
         }
         removed_paths = set(previous_manifest) - set(manifest)
-        await replace_changed_file_chunks(store, repo_id, changed_paths, removed_paths)
+        # Keep an existing searchable index intact until this run has produced
+        # a complete replacement. New chunks are hidden from retrieval during
+        # the re-index and the final cleanup preserves their job-scoped ids.
+        existing_count = await get_repo_chunk_count(store, repo_id)
+        defer_replacement = existing_count > 0
+        # ``existing_count`` still contains stale rows for changed or removed
+        # paths. Subtract them when enforcing the final chunk cap; otherwise a
+        # refresh near the limit can be rejected even when the committed
+        # post-refresh index would still fit.
+        stale_paths = sorted(changed_paths | removed_paths)
+        stale_chunk_count = 0
+        if stale_paths:
+            placeholders = ", ".join("?" for _ in stale_paths)
+            stale_rows = await store.fetch_one(
+                f"SELECT COUNT(*) AS count FROM chunks WHERE repo_id = ? AND file_path IN ({placeholders})",
+                [repo_id, *stale_paths],
+            )
+            stale_chunk_count = int((stale_rows or {}).get("count", 0))
+        retained_chunk_count = max(0, existing_count - stale_chunk_count)
+        if not defer_replacement:
+            await replace_changed_file_chunks(store, repo_id, changed_paths, removed_paths)
 
         changed_files = [
             file_path for file_path in files
@@ -743,11 +868,14 @@ async def run_ingestion_for_repo(
         # the whole repository on the 512 MB Render instance.
         chunked_paths: set[str] = set()
         new_chunk_count = 0
-        existing_count = await get_repo_chunk_count(store, repo_id)
         semantic_index_warning = None
         await update_repo(store, repo_id, status="chunking")
         chunk_started = time.perf_counter()
         keyword_published = False
+        # Include a fresh run id even when a durable ingestion job is retried;
+        # reusing only ``job_id`` would make cleanup match rows from the
+        # previous attempt as well.
+        chunk_id_prefix = f"{job_id or 'ingest'}-{uuid4()}-"
 
         async def persist_keyword_chunks(records: list[dict]) -> None:
             for offset in range(0, len(records), max(1, settings.chunk_insert_batch_size)):
@@ -781,7 +909,7 @@ async def run_ingestion_for_repo(
             chunk_buffer = []
             records = [
                 {
-                    "id": str(uuid4()), "repo_id": repo_id, "file_path": chunk["file_path"],
+                    "id": f"{chunk_id_prefix}{uuid4()}", "repo_id": repo_id, "file_path": chunk["file_path"],
                     "start_line": chunk["start_line"], "end_line": chunk["end_line"],
                     "language": chunk["language"], "symbols": chunk.get("symbols", []),
                     "content": chunk["content"], "embedding": None,
@@ -795,8 +923,15 @@ async def run_ingestion_for_repo(
             metrics["keyword_index_ms"] += int((time.perf_counter() - keyword_started) * 1000)
             if not keyword_published:
                 keyword_published = True
-                await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message="Codebase ready to explore. Semantic indexing is continuing in the background.")
-                await update_index_state(store, repo_id, phase="searchable", keyword_files=len(chunked_paths), keyword_chunks=await get_repo_chunk_count(store, repo_id), semantic_progress=0, embedding_status="running", searchable_at=timestamp())
+                if defer_replacement:
+                    # Do not expose duplicate old/new rows while a replacement
+                    # is being built. The old index remains stored and will be
+                    # restored automatically if this run fails.
+                    await update_repo(store, repo_id, status="chunking", chunk_count=existing_count, error_message="Refreshing the codebase. The previous index remains available after validation.")
+                    await update_index_state(store, repo_id, phase="chunking", keyword_files=len(chunked_paths), keyword_chunks=existing_count, semantic_progress=0, embedding_status="running")
+                else:
+                    await update_repo(store, repo_id, status="ready", chunk_count=await get_repo_chunk_count(store, repo_id), error_message="Codebase ready to explore. Semantic indexing is continuing in the background.")
+                    await update_index_state(store, repo_id, phase="searchable", keyword_files=len(chunked_paths), keyword_chunks=await get_repo_chunk_count(store, repo_id), semantic_progress=0, embedding_status="running", searchable_at=timestamp())
             if embeddings_disabled:
                 embedded_chunks = records
             else:
@@ -809,7 +944,12 @@ async def run_ingestion_for_repo(
                         job_id,
                         claim_token,
                         progress_offset=embedded_count,
-                        progress_total=max(existing_count + new_chunk_count, 1),
+                        progress_total=max(retained_chunk_count + new_chunk_count, 1),
+                        metrics=metrics,
+                        cache_enabled=(
+                            int(selection_report.get("eligible_bytes", 0))
+                            <= settings.embedding_cache_max_repository_bytes
+                        ),
                     )
                     metrics["embedding_ms"] += int((time.perf_counter() - embedding_started) * 1000)
                     metrics["chunks_embedded"] += sum(1 for chunk in embedded_chunks if chunk.get("embedding") is not None)
@@ -839,19 +979,29 @@ async def run_ingestion_for_repo(
             del batch
 
         file_index = 0
+        processed_paths: set[str] = set()
+        pressure = "normal"
         async for file_path, file_chunks in iter_chunked_files(changed_files, repo_path):
-            file_index += 1
             await raise_if_ingestion_cancelled(store, repo_id, claim_token)
             relative_path = os.path.relpath(file_path, repo_path).replace(os.sep, "/")
+            if relative_path not in processed_paths:
+                processed_paths.add(relative_path)
+                file_index += 1
             if not file_chunks:
                 continue
             chunked_paths.add(relative_path)
             new_chunk_count += len(file_chunks)
-            if existing_count + new_chunk_count > settings.max_repository_chunks:
+            if retained_chunk_count + new_chunk_count > settings.max_repository_chunks:
                 raise ValueError("Repository exceeds the configured chunk limit. Use a smaller repository.")
             chunk_buffer.extend(file_chunks)
             configured_buffer = max(1, settings.embedding_chunk_buffer_size)
-            if pressure_level() in {"elevated", "warning", "critical"}:
+            # RSS probing is cheap on Linux (/proc) but spawning ``ps`` for
+            # every streamed chunk is surprisingly expensive on macOS. A
+            # bounded 64-chunk sampling interval still reacts well before the
+            # next provider batch can add material memory pressure.
+            if new_chunk_count == len(file_chunks) or new_chunk_count % 64 == 0:
+                pressure = pressure_level()
+            if pressure in {"elevated", "warning", "critical"}:
                 configured_buffer = max(16, configured_buffer // 2)
             if len(chunk_buffer) >= configured_buffer:
                 await flush_chunk_buffer()
@@ -880,6 +1030,13 @@ async def run_ingestion_for_repo(
         if not chunked_paths and existing_count == 0:
             raise ValueError("No readable source code chunks were created from this repository.")
 
+        if defer_replacement:
+            # Replace only the previous version. The current run's rows are
+            # identified by the job prefix and remain untouched.
+            await replace_changed_file_chunks(
+                store, repo_id, changed_paths, removed_paths, preserve_id_prefix=chunk_id_prefix,
+            )
+            replacement_swapped = True
         await persist_file_manifest(store, repo_id, manifest)
         await persist_dependency_manifest(store, repo_id, dependencies)
         indexed_count = await store.fetch_one(
@@ -920,16 +1077,48 @@ async def run_ingestion_for_repo(
     except IngestionCancelledError:
         logger.info("Repository ingestion cancelled for %s", repo_id)
         if repo_id:
-            await store.execute("DELETE FROM chunks WHERE repo_id = ?", [repo_id])
-            await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo_id])
-            await store.execute("DELETE FROM repo_files WHERE repo_id = ?", [repo_id])
-            await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo_id])
-            await store.execute("DELETE FROM repo_coverage WHERE repo_id = ?", [repo_id])
-            await update_repo(store, repo_id, status="cancelled", chunk_count=0, error_message="Indexing stopped by you.")
-            try:
-                await update_index_state(store, repo_id, phase="cancelled", keyword_chunks=0, semantic_progress=0, embedding_status="degraded")
-            except Exception:
-                logger.debug("Could not publish cancelled ingestion state", exc_info=True)
+            if replacement_swapped:
+                # A cancellation can race the final swap. At that point the
+                # old changed rows are already gone, so deleting the fresh
+                # rows would leave a partially indexed repository. Preserve
+                # the committed rows and finish the durable state instead.
+                chunk_count = await get_repo_chunk_count(store, repo_id)
+                await update_repo(
+                    store, repo_id, status="ready", chunk_count=chunk_count,
+                    error_message="The refresh completed before cancellation was received.",
+                )
+                try:
+                    await publish_index_progress(store, repo_id, allow_ready=True)
+                except Exception:
+                    logger.debug("Could not publish completed cancellation state", exc_info=True)
+                return True
+            if chunk_id_prefix:
+                # Remove only this attempt's rows. A previous searchable
+                # version, if present, remains available for questions.
+                await store.execute(
+                    "DELETE FROM chunks WHERE repo_id = ? AND id LIKE ?",
+                    [repo_id, f"{chunk_id_prefix}%"],
+                )
+            if preexisting_chunk_count > 0:
+                chunk_count = await get_repo_chunk_count(store, repo_id)
+                await update_repo(
+                    store, repo_id, status="ready", chunk_count=chunk_count,
+                    error_message="Index refresh stopped. The previous index remains available.",
+                )
+                try:
+                    await publish_index_progress(store, repo_id, allow_ready=True)
+                except Exception:
+                    logger.debug("Could not restore previous searchable state", exc_info=True)
+            else:
+                await store.execute("DELETE FROM kt_cache WHERE repo_id = ?", [repo_id])
+                await store.execute("DELETE FROM repo_files WHERE repo_id = ?", [repo_id])
+                await store.execute("DELETE FROM repo_dependencies WHERE repo_id = ?", [repo_id])
+                await store.execute("DELETE FROM repo_coverage WHERE repo_id = ?", [repo_id])
+                await update_repo(store, repo_id, status="cancelled", chunk_count=0, error_message="Indexing stopped by you.")
+                try:
+                    await update_index_state(store, repo_id, phase="cancelled", keyword_chunks=0, semantic_progress=0, embedding_status="degraded")
+                except Exception:
+                    logger.debug("Could not publish cancelled ingestion state", exc_info=True)
         return False
     except Exception as error:
         error_message = str(error).strip() if isinstance(error, (ValueError, RepositoryValidationError)) else explain_database_error(error)
@@ -939,6 +1128,18 @@ async def run_ingestion_for_repo(
         else:
             logger.exception("Repository ingestion failed")
         if repo_id:
+            # A failed run must not leave half of a new index behind. The
+            # job-scoped prefix also lets an existing index survive a failed
+            # re-index because its rows never share this prefix.
+            chunk_id_prefix = locals().get("chunk_id_prefix")
+            if chunk_id_prefix:
+                try:
+                    await store.execute(
+                        "DELETE FROM chunks WHERE repo_id = ? AND id LIKE ?",
+                        [repo_id, f"{chunk_id_prefix}%"],
+                    )
+                except Exception:
+                    logger.debug("Could not remove partial ingestion chunks", exc_info=True)
             await update_repo(store, repo_id, status="failed", error_message=error_message[:500])
             try:
                 await update_index_state(store, repo_id, phase="failed", embedding_status="degraded")

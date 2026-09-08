@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import re
+from array import array
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Iterable
@@ -57,6 +58,12 @@ def get_supabase_client():
 supabase = get_supabase_client()
 
 JSON_COLUMNS = {"symbols", "citations", "tool_calls", "tech_stack", "file_summaries", "excluded_reasons", "excluded_paths"}
+
+
+def _embedding_json(vector: Any) -> str:
+    """Encode packed or ordinary vectors without retaining Python float lists."""
+    values = vector.tolist() if isinstance(vector, array) else vector
+    return json.dumps(values, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -275,7 +282,7 @@ class TursoStore:
             else:
                 with_embeddings.append(Statement(
                     vector_sql,
-                    values + [json.dumps(chunk["embedding"], separators=(",", ":"))],
+                    values + [_embedding_json(chunk["embedding"])],
                 ))
         await self.batch(with_embeddings + without_embeddings)
 
@@ -289,7 +296,7 @@ class TursoStore:
                 continue
             statements.append(Statement(
                 sql,
-                [json.dumps(embedding, separators=(",", ":")), chunk["id"], chunk["repo_id"]],
+                [_embedding_json(embedding), chunk["id"], chunk["repo_id"]],
             ))
         if statements:
             await self.batch(statements)
@@ -324,7 +331,7 @@ class TursoStore:
                 "(content_hash, model, dimension, embedding_json, updated_at) VALUES (?, ?, ?, ?, ?)",
                 [
                     record["content_hash"], settings.embedding_model, settings.embedding_dimension,
-                    json.dumps(record["embedding"], separators=(",", ":")), record["updated_at"],
+                    _embedding_json(record["embedding"]), record["updated_at"],
                 ],
             ))
         if statements:

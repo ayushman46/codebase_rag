@@ -1,4 +1,5 @@
 import threading
+from array import array
 import time
 from collections import deque
 from functools import lru_cache
@@ -175,7 +176,12 @@ def embed_chunks(
             continue
 
         for chunk, emb in zip(batch, embeddings):
-            chunk['embedding'] = list(emb)
+            # Keep vectors packed while they move through the worker. A Python
+            # list of 2,048 float objects can leave hundreds of MB in the
+            # allocator after a large repository, even though only one bounded
+            # batch is live at a time. Turso's vector32 column has the same
+            # float32 precision, so this is lossless for persisted/search data.
+            chunk['embedding'] = array('f', emb)
         offset += current_size
 
     return chunks
